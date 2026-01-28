@@ -6,12 +6,10 @@ from ntops.torch.utils import _cached_make
 
 def signbit(input, *, out=None):
     if out is None:
-        output = torch.empty_like(input)
-    else:
-        output = out
+        out = torch.empty_like(input)
 
     kernel = _cached_make(ntops.kernels.signbit.premake, input.ndim)
 
-    kernel(input, output)
+    kernel(input, out)
 
-    return output
+    return out

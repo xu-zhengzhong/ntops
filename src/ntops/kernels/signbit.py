@@ -12,9 +12,10 @@ def application(input, output):
     neg = input < 0
 
     is_zero = input == 0
-    neg_zero = is_zero and ((1 / input) == float("-inf"))
+    neg_zero = is_zero & ((1 / input) == float("-inf"))
 
-    output = neg or neg_zero  # noqa: F841
+    # output = neg | neg_zero  # noqa: F841
+    output = output.ndim()
 
 
 def premake(ndim, dtype=None, block_size=None):
