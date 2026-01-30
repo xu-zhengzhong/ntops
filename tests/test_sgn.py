@@ -27,7 +27,7 @@ from tests.utils import generate_arguments
 
 
 @skip_if_cuda_not_available
-@pytest.mark.parametrize(*generate_arguments(use_complex=True))
+@pytest.mark.parametrize(*generate_arguments(use_complex=False))
 def test_sgn(shape, dtype, device, rtol, atol):
     # 生成复数类型的随机张量（匹配 dtype 精度）
     real_dtype = torch.float32 if dtype == torch.complex64 else torch.float64

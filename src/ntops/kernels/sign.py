@@ -1,20 +1,13 @@
 import functools
 
 from ninetoothed import Tensor
+import ninetoothed.language as ntl
 
 from ntops.kernels.element_wise import arrangement
 
 
 def application(input, output):
-    # signbit(x) should be True for:
-    # 1) x < 0
-    # 2) x is -0.0 (important: -0.0 has sign bit set but x < 0 is False)
-    neg = input < 0
-
-    is_zero = input == 0
-    neg_zero = is_zero & ((1 / input) == float("-inf"))
-
-    output = neg | neg_zero  # noqa: F841
+    output = ntl.where(input > 0, 1, ntl.where(input < 0, -1, 0))  # noqa: F841
 
 
 def premake(ndim, dtype=None, block_size=None):
