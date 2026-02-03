@@ -13,7 +13,7 @@ import ninetoothed
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
 
-def arrangement(input, output, dims, k, block_size=None):
+def arrangement(input, output, k, dims, block_size=None):
     if block_size is None:
         block_size = ninetoothed.block_size()
 
@@ -81,8 +81,8 @@ def application_2(input, output):
             for k in range(z):
                 output[i, j, k] = input[i, y - 1 - j, z - 1 - k]  # noqa: F841
 
-def premake(ndim, dims, k, dtype=None, block_size=None):
-    arrangement_ = functools.partial(arrangement, dims=dims, k=k, block_size=block_size)
+def premake(ndim, k=1, dims=(0, 1), dtype=None, block_size=None):
+    arrangement_ = functools.partial(arrangement, k=k, dims=dims, block_size=block_size)
 
     tensors = (
         Tensor(ndim, dtype=dtype),
