@@ -25,6 +25,7 @@ from ntops.kernels import (
     ne,
     neg,
     pow,
+    quantile,
     relu,
     rms_norm,
     rot90,
@@ -38,6 +39,7 @@ from ntops.kernels import (
     silu,
     sin,
     softmax,
+    sort,
     sub,
     tanh,
 )
@@ -69,6 +71,7 @@ __all__ = [
     "ne",
     "neg",
     "pow",
+    "quantile",
     "relu",
     "rms_norm",
     "rot90",
@@ -82,6 +85,7 @@ __all__ = [
     "silu",
     "sin",
     "softmax",
+    "sort",
     "sub",
     "tanh",
 ]

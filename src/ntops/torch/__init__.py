@@ -25,6 +25,7 @@ from ntops.torch.mul import mul
 from ntops.torch.ne import ne
 from ntops.torch.neg import neg
 from ntops.torch.pow import pow
+from ntops.torch.quantile import quantile
 from ntops.torch.relu import relu
 from ntops.torch.rms_norm import rms_norm
 from ntops.torch.rot90 import rot90
@@ -37,6 +38,7 @@ from ntops.torch.signbit import signbit
 from ntops.torch.silu import silu
 from ntops.torch.sin import sin
 from ntops.torch.softmax import softmax
+from ntops.torch.sort import sort
 from ntops.torch.sub import sub
 from ntops.torch.tanh import tanh
 
@@ -68,6 +70,7 @@ __all__ = [
     "ne",
     "neg",
     "pow",
+    "quantile",
     "relu",
     "rms_norm",
     "rot90",
@@ -80,6 +83,7 @@ __all__ = [
     "silu",
     "sin",
     "softmax",
+    "sort",
     "sub",
     "tanh",
 ]
