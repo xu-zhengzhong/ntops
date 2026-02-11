@@ -32,17 +32,27 @@ def quantile(input, q, dim=-1, keepdim=False, interpolation='linear', out=None):
     
     # Compute the quantiles using the sorted tensor
     out_shape = list(input.shape)
-    out_shape.insert(0, q.shape[0])
-    out_shape[dim + 1] = 1
-
+    out_shape[dim] = 1
     if keepdim == False:
-        out_shape.pop(dim + 1)
+        out_shape.pop(dim)
+    out_shape.insert(0, q.shape[0])
 
     if out is None:
         out = torch.empty(out_shape, dtype=input.dtype, device=input.device)
     
-    kernel = _cached_make(ntops.kernels.quantile.premake, input.ndim, out.ndim, dim, interpolation)
+    if sorted.ndim == 1:
+        if dim == -1:
+            sorted = sorted.unsqueeze(0)
+        else:
+            sorted = sorted.unsqueeze(-1)
     
-    kernel(sorted, q, out)
+    if out.ndim == 1:
+        out_adjusted = out.unsqueeze(-1)
+    else:
+        out_adjusted = out
+    
+    kernel = _cached_make(ntops.kernels.quantile.premake, sorted.ndim, out_adjusted.ndim, dim, interpolation)
+    
+    kernel(sorted, q, out_adjusted)
     
     return out

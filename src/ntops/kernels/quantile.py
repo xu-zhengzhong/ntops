@@ -3,7 +3,6 @@ import ninetoothed
 
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
-from ninetoothed.language import libdevice
 
 def arrangement(input, q, output, dim, block_size=None):
     if block_size is None:
@@ -20,8 +19,6 @@ def arrangement(input, q, output, dim, block_size=None):
     output_arranged.dtype = output_arranged.dtype.squeeze(0)
 
     input_arranged = input.permute(non_target_dims + (dim,))
-    if ndim == 1:
-        input_arranged = input_arranged.unsqueeze(0)
     input_arranged = input_arranged.flatten(end_dim=-1)
     input_arranged = input_arranged.tile((block_size, 1))
     input_arranged.dtype = input_arranged.dtype.squeeze(1)
@@ -90,8 +87,16 @@ def higher_application(input, q, output):
 
 def nearest_application(input, q, output):
     n = ntl.cast(input.shape[0], ntl.int32)
-    pos = libdevice.round(q * (n - 1))
-    i = ntl.cast(pos, ntl.int32)
+    pos = ntl.cast(q * (n - 1), ntl.float32)
+    i = ntl.cast(ntl.floor(pos), ntl.int32)
+    frac = ntl.cast(pos - i, ntl.float32)
+    if frac > 0.5:
+        if i + 1 < n:
+            i = i + 1
+    elif frac == 0.5:
+        # round half to even
+        if i + 1 < n and (i % 2 == 1):
+            i = i + 1
 
     output = input[i] # noqa: F841
 
@@ -123,7 +128,9 @@ def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None)
         Tensor(out_ndim, dtype=dtype),
     )
 
-    if interpolation == 'lower':
+    if interpolation == 'linear':
+        application = linear_application
+    elif interpolation == 'lower':
         application = lower_application
     elif interpolation == 'higher':
         application = higher_application
@@ -132,30 +139,31 @@ def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None)
     elif interpolation == 'midpoint':
         application = midpoint_application
     else:
-        application = linear_application # default
+        raise ValueError(f"Unsupported interpolation method: {interpolation}")
     
     return arrangement_, application, tensors
 
-dim = -1
-interpolation = 'midpoint'
+# dim = -1
+# interpolation = 'nearest'
+# keepdim=False
 
-import torch
-dtype = torch.float32
-device = torch.device("cuda")
+# import torch
+# dtype = torch.float32
+# device = torch.device("cuda")
 
-torch.manual_seed(42)
-x = torch.rand(3, dtype=dtype, device=device)
-x, _ = torch.sort(x, dim=dim)
-q = torch.tensor([0.25, 0.5, 0.75], dtype=dtype, device=device)
-ref = torch.quantile(x, q, dim=dim, interpolation=interpolation, keepdim=True)
-y = torch.empty_like(ref)
+# torch.manual_seed(42)
+# x = torch.rand(3, dtype=dtype, device=device)
+# x, _ = torch.sort(x, dim=dim)
+# q = torch.tensor([0.25, 0.5, 0.75], dtype=dtype, device=device)
+# ref = torch.quantile(x, q, dim=dim, interpolation=interpolation, keepdim=keepdim)
+# y = torch.empty_like(ref)
 
-from ntops.torch.utils import _cached_make
-kernel = _cached_make(premake, x.dim(), y.dim(), dim, interpolation)
+# from ntops.torch.utils import _cached_make
+# kernel = _cached_make(premake, x.dim() + 1, y.dim() + 1, dim, interpolation)
 
-kernel(x, q, y)
+# kernel(x.unsqueeze(0), q, y.unsqueeze(-1))
 
-print(x)
-print(y)
-print(ref)
-# assert torch.allclose(y, reference)
+# print(x)
+# print(y)
+# print(ref)
+# # assert torch.allclose(y, reference)
