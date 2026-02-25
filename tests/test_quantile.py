@@ -17,9 +17,9 @@ def test_quantile(shape, keepdim, interpolation, dtype, device, rtol, atol):
         return
     
     input = torch.randn(shape, dtype=dtype, device=device)
-    q_size = random.randint(1, 10)
-    q = torch.rand(q_size, dtype=dtype, device=device)
-    dim = random.randint(0, input.ndim - 1)
+    q_size = random.randint(0, 7)
+    q = torch.rand(q_size, dtype=dtype, device=device) if q_size > 0 else random.random()  # q 可以是标量或张量
+    dim = random.randint(0, input.ndim - 1) if q_size < 5 else None  # 如果 q_size 较大，测试整体 quantile（dim=None）
 
     ninetoothed_output = ntops.torch.quantile(input, q, dim=dim, keepdim=keepdim, interpolation=interpolation)
     reference_output = torch.quantile(input, q, dim=dim, keepdim=keepdim, interpolation=interpolation)

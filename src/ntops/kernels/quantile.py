@@ -4,128 +4,99 @@ import ninetoothed
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
 
-def arrangement(input, q, output, dim, block_size=None):
-    if block_size is None:
-        block_size = ninetoothed.block_size()
+def arrangement(input, q, dim_size, output, dim, block_size=None):
+    def _arrange_input_or_output(tensor, dim):
+        ndim = tensor.ndim
+        if dim < 0:
+            dim += ndim
+        
+        non_target_dims = tuple(i for i in range(ndim) if i != dim)
+
+        arranged = tensor.permute(non_target_dims + (dim,))
+
+        block_shape = tuple(1 for _ in non_target_dims) + (-1,)
+        non_target_dim_indices = tuple(range(len(non_target_dims)))
+
+        arranged = arranged.tile(block_shape)
+        arranged.dtype = arranged.dtype.squeeze(non_target_dim_indices)
+
+        return arranged
+
+    input_arranged = _arrange_input_or_output(input, dim)
+    output_arranged = _arrange_input_or_output(output, 0)
+
+    q_arranged = q.tile((-1,))
+    q_arranged = q_arranged.squeeze(0)
+
+    for _ in range(output_arranged.ndim):
+        q_arranged = q_arranged.unsqueeze(0)
     
-    ndim = input.ndim
-    if dim < 0:
-        dim += ndim
+    q_arranged = q_arranged.expand(output_arranged.shape)
 
-    non_target_dims = tuple(i for i in range(input.ndim) if i != dim)
+    return input_arranged, q_arranged, dim_size, output_arranged
 
-    output_arranged = output.flatten(start_dim=1)
-    output_arranged = output_arranged.tile((1, block_size))
-    output_arranged.dtype = output_arranged.dtype.squeeze(0)
+def linear_application(input, q, dim_size, output):
+    pos = ntl.cast(q * (dim_size - 1), ntl.float32)
+    i = ntl.cast(ntl.floor(pos), ntl.int32)
+    j = ntl.cast(ntl.ceil(pos), ntl.int32)
+    frac = pos - i
 
-    input_arranged = input.permute(non_target_dims + (dim,))
-    input_arranged = input_arranged.flatten(end_dim=-1)
-    input_arranged = input_arranged.tile((block_size, 1))
-    input_arranged.dtype = input_arranged.dtype.squeeze(1)
-    input_arranged = input_arranged.tile((1, -1))
-    input_arranged = input_arranged.squeeze(1)
-    input_arranged.dtype = input_arranged.dtype.squeeze(0)
-    input_arranged = input_arranged.unsqueeze(0)
-    input_arranged = input_arranged.expand((output_arranged.shape[0], -1))
+    sorted = ntl.sort(input)
+    lower_value = ntl.gather(sorted, i, 0)
+    higher_value = ntl.gather(sorted, j, 0)
 
-    q_arranged = q.tile((1,))
-    q_arranged.dtype = q_arranged.dtype.squeeze(0)
-    q_arranged = q_arranged.unsqueeze(1)
-    q_arranged = q_arranged.expand((-1, output_arranged.shape[1]))
+    output = lower_value + frac * (higher_value - lower_value) # noqa: F841
 
-    return input_arranged, q_arranged, output_arranged
+def lower_application(input, q, dim_size, output):
+    pos = ntl.cast(q * (dim_size - 1), ntl.float32)
+    i = ntl.cast(ntl.floor(pos), ntl.int32)
 
-def linear_application(input, q, output):
-    n = ntl.cast(input.shape[0], ntl.int32)
-    pos = ntl.cast(q * (n - 1), ntl.float32)
-    pos_int = ntl.cast(pos, ntl.int32)
-    pos_int_float = ntl.cast(pos_int, ntl.float32)
+    sorted = ntl.sort(input)
+    lower_value = ntl.gather(sorted, i, 0)
 
-    if pos == pos_int_float:
-        output = input[pos_int] # noqa: F841
-    else:
-        i = ntl.cast(ntl.floor(pos), ntl.int32)
-        frac = ntl.cast(pos - i, ntl.float32)
-        
-        if i + 1 < n:
-            j = i + 1
-        else:
-            j = i
+    output = lower_value # noqa: F841
 
-        output = input[i] + frac * (input[j] - input[i]) # noqa: F841
+def higher_application(input, q, dim_size, output):
+    pos = ntl.cast(q * (dim_size - 1), ntl.float32)
+    j = ntl.cast(ntl.ceil(pos), ntl.int32)
 
-def lower_application(input, q, output):
-    n = ntl.cast(input.shape[0], ntl.int32)
-    pos = ntl.cast(q * (n - 1), ntl.float32)
-    pos_int = ntl.cast(pos, ntl.int32)
-    pos_int_float = ntl.cast(pos_int, ntl.float32)
+    sorted = ntl.sort(input)
+    higher_value = ntl.gather(sorted, j, 0)
 
-    if pos == pos_int_float:
-        output = input[pos_int] # noqa: F841
-    else:
-        i = ntl.cast(ntl.floor(pos), ntl.int32)
+    output = higher_value # noqa: F841
 
-        output = input[i] # noqa: F841
+def nearest_application(input, q, dim_size, output):
+    pos = ntl.cast(q * (dim_size - 1), ntl.float32)
 
-def higher_application(input, q, output):
-    n = ntl.cast(input.shape[0], ntl.int32)
-    pos = ntl.cast(q * (n - 1), ntl.float32)
-    pos_int = ntl.cast(pos, ntl.int32)
-    pos_int_float = ntl.cast(pos_int, ntl.float32)
-
-    if pos == pos_int_float:
-        output = input[pos_int] # noqa: F841
-    else:
-        i = ntl.cast(ntl.floor(pos), ntl.int32)
-        
-        if i + 1 < n:
-            j = i + 1
-        else:
-            j = i
-
-        output = input[j] # noqa: F841
-
-def nearest_application(input, q, output):
-    n = ntl.cast(input.shape[0], ntl.int32)
-    pos = ntl.cast(q * (n - 1), ntl.float32)
+    # Rounding mode for `float` to `int` conversion is always towards zero,
+    # we have to manually implement `rtne` (round to nearest, ties to even).
     i = ntl.cast(ntl.floor(pos), ntl.int32)
     frac = ntl.cast(pos - i, ntl.float32)
-    if frac > 0.5:
-        if i + 1 < n:
-            i = i + 1
-    elif frac == 0.5:
-        # round half to even
-        if i + 1 < n and (i % 2 == 1):
-            i = i + 1
+    i = ntl.where(frac > 0.5, ntl.minimum(i + 1, dim_size - 1), i)
+    i = ntl.where((frac == 0.5) & (i % 2 == 1), ntl.minimum(i + 1, dim_size - 1), i)
 
-    output = input[i] # noqa: F841
+    sorted = ntl.sort(input)
+    output = ntl.gather(sorted, i, 0) # noqa: F841
 
-def midpoint_application(input, q, output):
-    n = ntl.cast(input.shape[0], ntl.int32)
-    pos = ntl.cast(q * (n - 1), ntl.float32)
-    pos_int = ntl.cast(pos, ntl.int32)
-    pos_int_float = ntl.cast(pos_int, ntl.float32)
+def midpoint_application(input, q, dim_size, output):
+    pos = ntl.cast(q * (dim_size - 1), ntl.float32)
+    i = ntl.cast(ntl.floor(pos), ntl.int32)
+    j = ntl.cast(ntl.ceil(pos), ntl.int32)
 
-    if pos == pos_int_float:
-        output = input[pos_int] # noqa: F841
-    else:
-        i = ntl.cast(ntl.floor(pos), ntl.int32)
-        frac = ntl.cast(pos - i, ntl.float32)
-        
-        if i + 1 < n:
-            j = i + 1
-        else:
-            j = i
+    sorted = ntl.sort(input)
+    lower_value = ntl.gather(sorted, i, 0)
+    higher_value = ntl.gather(sorted, j, 0)
 
-        output = (input[i] + input[j]) / 2 # noqa: F841
+    output = (higher_value + lower_value) / 2 # noqa: F841
 
 def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None):
     arrangement_ = functools.partial(arrangement, dim=dim, block_size=block_size)
 
     tensors = (
-        Tensor(in_ndim, dtype=dtype),
-        Tensor(1, dtype=dtype),
-        Tensor(out_ndim, dtype=dtype),
+        Tensor(in_ndim, dtype=dtype, shape_options={"constexpr": True}),
+        Tensor(1, dtype=dtype, shape_options={"constexpr": True}),
+        Tensor(0),
+        Tensor(out_ndim, dtype=dtype, shape_options={"constexpr": True}),
     )
 
     if interpolation == 'linear':
@@ -144,7 +115,7 @@ def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None)
     return arrangement_, application, tensors
 
 # dim = -1
-# interpolation = 'nearest'
+# interpolation = 'midpoint'
 # keepdim=False
 
 # import torch
@@ -152,18 +123,24 @@ def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None)
 # device = torch.device("cuda")
 
 # torch.manual_seed(42)
-# x = torch.rand(3, dtype=dtype, device=device)
-# x, _ = torch.sort(x, dim=dim)
-# q = torch.tensor([0.25, 0.5, 0.75], dtype=dtype, device=device)
+# x = torch.rand(2, 4, dtype=dtype, device=device)
+# # x, _ = torch.sort(x, dim=dim)
+# q = torch.tensor([0.25, 0.5, 0.75, 0.9], dtype=dtype, device=device)
 # ref = torch.quantile(x, q, dim=dim, interpolation=interpolation, keepdim=keepdim)
 # y = torch.empty_like(ref)
 
 # from ntops.torch.utils import _cached_make
-# kernel = _cached_make(premake, x.dim() + 1, y.dim() + 1, dim, interpolation)
+# # kernel = _cached_make(premake, x.dim() + 1, y.dim() + 1, dim, interpolation)
 
-# kernel(x.unsqueeze(0), q, y.unsqueeze(-1))
+# # kernel(x.unsqueeze(0), q, y.unsqueeze(-1))
+# kernel = _cached_make(premake, x.dim(), y.dim(), dim, interpolation)
 
+# kernel(x, q, x.shape[dim], y)
+
+# print("Input:")
 # print(x)
+# print("Output:")
 # print(y)
+# print("Reference:")
 # print(ref)
 # # assert torch.allclose(y, reference)

@@ -3,56 +3,74 @@ import torch
 import ntops
 from ntops.torch.utils import _cached_make
 
-
-def quantile(input, q, dim=-1, keepdim=False, interpolation='linear', out=None):
-    # Sort the input tensor along the specified dimension
-    sorted = torch.empty_like(input)
-    
+def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
     dim_size = input.shape[dim]
     dim_size_padded = 1
     while dim_size_padded < dim_size:
         dim_size_padded *= 2
     
-    sort_kernel = _cached_make(ntops.kernels.sort.premake, input.ndim, dim)
-
-    if dim_size_padded != dim_size:
-        sorted_padded_shape = list(input.shape)
-        sorted_padded_shape[dim] = dim_size_padded
-        sorted_padded = torch.empty(sorted_padded_shape, dtype=input.dtype, device=input.device)
-
-        input_padded = torch.empty(sorted_padded_shape, dtype=input.dtype, device=input.device)
-        input_padded.narrow(dim, 0, dim_size).copy_(input)
-        input_padded.narrow(dim, dim_size, dim_size_padded - dim_size).copy_(float("inf"))
-
-        sort_kernel(input_padded, False, sorted_padded)
-
-        sorted.copy_(sorted_padded.narrow(dim, 0, dim_size))
-    else:
-        sort_kernel(input, False, sorted)
+    if dim_size_padded == dim_size:
+        return input
     
-    # Compute the quantiles using the sorted tensor
-    out_shape = list(input.shape)
-    out_shape[dim] = 1
-    if keepdim == False:
-        out_shape.pop(dim)
-    out_shape.insert(0, q.shape[0])
+    padded_shape = list(input.shape)
+    padded_shape[dim] = dim_size_padded
+    flattened_size = 1
+    for s in padded_shape:
+        flattened_size *= s
+    # padded_input = torch.tensor([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
+    padded_input = torch.from_list([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
+    padded_input = padded_input.view(padded_shape)
+    padded_input.narrow(dim, 0, dim_size).copy_(input)
+    # padded_input.narrow(dim, dim_size, dim_size_padded - dim_size).copy_(pad_value)
+    
+    return padded_input
 
+def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None):
+    if isinstance(q, float):
+        # q = torch.tensor([q], dtype=input.dtype, device=input.device)
+        q = torch.from_list([q], dtype=input.dtype, device=input.device)
+        is_scalar = True
+    elif q.ndim == 0:
+        q = q.unsqueeze(0)
+    
+    # If dim is None, input tensor will be flattened before computation.
+    ndim = None
+    if dim == None:
+        ndim = input.ndim
+        # `flatten` is not supported in `infinicore.tensor`, use `view` instead.
+        flattened_size = 1
+        for s in input.shape:
+            flattened_size *= s
+        input = input.contiguous().view([flattened_size])
+        dim = 0
+    
+    # Pad the input and q tensors to the next power of 2 along the specified dimensions.
+    input_padded = _pad_to_next_power_of_2(input, dim)
+    q_padded = _pad_to_next_power_of_2(q, 0, pad_value=0.0)
+    
     if out is None:
+        out_shape = list(input.shape)
+        out_shape[dim] = 1
+        if keepdim == False:
+            out_shape.pop(dim)
+        elif ndim is not None:
+            out_shape.extend([1] * (ndim - 1))
+        out_shape.insert(0, q.shape[0])
         out = torch.empty(out_shape, dtype=input.dtype, device=input.device)
+    elif is_scalar:
+        # If q is a scalar and out has the same number of dimensions as input, we unsqueeze out to make it compatible with the kernel.
+        out = out.unsqueeze(0)
     
-    if sorted.ndim == 1:
-        if dim == -1:
-            sorted = sorted.unsqueeze(0)
-        else:
-            sorted = sorted.unsqueeze(-1)
-    
-    if out.ndim == 1:
-        out_adjusted = out.unsqueeze(-1)
+    if keepdim == True:
+        out_adjust = out.squeeze(dim + 1)
     else:
-        out_adjusted = out
+        out_adjust = out
     
-    kernel = _cached_make(ntops.kernels.quantile.premake, sorted.ndim, out_adjusted.ndim, dim, interpolation)
+    # kernel = _cached_make(ntops.kernels.quantile.premake, input.ndim, out.ndim, dim, interpolation)
     
-    kernel(sorted, q, out_adjusted)
+    # kernel(input_padded, q_padded, input.shape[dim], out)
+    kernel = _cached_make(ntops.kernels.quantile.premake, input.ndim, out_adjust.ndim, dim, interpolation)
+    
+    kernel(input_padded, q_padded, input.shape[dim], out_adjust)
     
     return out
