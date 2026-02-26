@@ -17,11 +17,11 @@ def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
     flattened_size = 1
     for s in padded_shape:
         flattened_size *= s
+    # `infinicore.tensor` does not support `full`, so we create a tensor from a list instead.
     # padded_input = torch.tensor([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
     padded_input = torch.from_list([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
     padded_input = padded_input.view(padded_shape)
     padded_input.narrow(dim, 0, dim_size).copy_(input)
-    # padded_input.narrow(dim, dim_size, dim_size_padded - dim_size).copy_(pad_value)
     
     return padded_input
 
@@ -48,6 +48,7 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
     input_padded = _pad_to_next_power_of_2(input, dim)
     q_padded = _pad_to_next_power_of_2(q, 0, pad_value=0.0)
     
+    copy_back = False
     if out is None:
         out_shape = list(input.shape)
         out_shape[dim] = 1
@@ -58,19 +59,31 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
         out_shape.insert(0, q.shape[0])
         out = torch.empty(out_shape, dtype=input.dtype, device=input.device)
     elif is_scalar:
-        # If q is a scalar and out has the same number of dimensions as input, we unsqueeze out to make it compatible with the kernel.
-        out = out.unsqueeze(0)
+        # If `q` is a scalar, the corresponding `output` will also be a scalar,
+        # but the application uses `gather` to get the sorted values, which requires
+        # the `output` to have at least 1 dimension. We can unsqueeze the `output`
+        # to make it compatible with the application.
+        if out.is_contiguous():
+            out = out.unsqueeze(0)
+        else:
+            # `unsqueeze` for non-contiguous `infinicore.tensor` does not work right,
+            # so we create a new contiguous tensor and copy back the result after computation.
+            original_out = out
+            copy_back = True
+            out = out.contiguous()
+            out = out.unsqueeze(0)
     
     if keepdim == True:
         out_adjust = out.squeeze(dim + 1)
     else:
         out_adjust = out
     
-    # kernel = _cached_make(ntops.kernels.quantile.premake, input.ndim, out.ndim, dim, interpolation)
-    
-    # kernel(input_padded, q_padded, input.shape[dim], out)
     kernel = _cached_make(ntops.kernels.quantile.premake, input.ndim, out_adjust.ndim, dim, interpolation)
     
     kernel(input_padded, q_padded, input.shape[dim], out_adjust)
+    
+    if copy_back:
+        original_out.copy_(out.squeeze(0))
+        out = original_out
     
     return out
