@@ -26,6 +26,7 @@ def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
     return padded_input
 
 def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None):
+    is_scalar = False
     if isinstance(q, float):
         # q = torch.tensor([q], dtype=input.dtype, device=input.device)
         q = torch.from_list([q], dtype=input.dtype, device=input.device)
@@ -58,19 +59,18 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
             out_shape.extend([1] * (ndim - 1))
         out_shape.insert(0, q.shape[0])
         out = torch.empty(out_shape, dtype=input.dtype, device=input.device)
-    elif is_scalar:
-        # If `q` is a scalar, the corresponding `output` will also be a scalar,
-        # but the application uses `gather` to get the sorted values, which requires
-        # the `output` to have at least 1 dimension. We can unsqueeze the `output`
-        # to make it compatible with the application.
-        if out.is_contiguous():
-            out = out.unsqueeze(0)
-        else:
-            # `unsqueeze` for non-contiguous `infinicore.tensor` does not work right,
+    else:
+        if out.is_contiguous() == False:
+            # Non-contiguous tensor does not work right,
             # so we create a new contiguous tensor and copy back the result after computation.
             original_out = out
             copy_back = True
             out = out.contiguous()
+        if is_scalar:
+            # If `q` is a scalar, the corresponding `output` will also be a scalar,
+            # but the application uses `gather` to get the sorted values, which requires
+            # the `output` to have at least 1 dimension. We can unsqueeze the `output`
+            # to make it compatible with the application.
             out = out.unsqueeze(0)
     
     if keepdim == True:
@@ -82,8 +82,11 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
     
     kernel(input_padded, q_padded, input.shape[dim], out_adjust)
     
+    if is_scalar:
+        out = out.squeeze(0)
+    
     if copy_back:
-        original_out.copy_(out.squeeze(0))
+        original_out.copy_(out)
         out = original_out
     
     return out
