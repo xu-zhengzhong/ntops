@@ -1,26 +1,16 @@
-'''
-Docstring for ntops.src.ntops.kernels.rot90
-
-rot90(input, k=1, dims=(0,1)) -> Tensor
-Rotate a matrix by 90 degrees in the plane specified by dims axes.
-
-- for k % 4 = 1: output = input.flip(dims[1]).transpose(dims[0], dims[1])
-- for k % 4 = 2: output = input.flip(dims[0]).flip(dims[1])
-- for k % 4 = 3: output = input.transpose(dims[0], dims[1]).flip(dims[1])
-'''
 import functools
 import ninetoothed
+
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
+
 
 def arrangement(input, output, k, dims, block_size=None):
     if block_size is None:
         block_size = ninetoothed.block_size()
 
     ndim = input.ndim
-
-    dims     = tuple(dim if dim >= 0 else dim + ndim for dim in dims)
-
+    dims = tuple(dim if dim >= 0 else dim + ndim for dim in dims)
     non_target_dims = tuple(i for i in range(ndim) if i not in dims)
 
     def _arrange_0(tensor):
@@ -32,8 +22,8 @@ def arrangement(input, output, k, dims, block_size=None):
     def _arrange_1_or_3(tensor, dims):
         arranged = tensor.permute(non_target_dims + dims)
         arranged = arranged.flatten(end_dim=-1)
-        arranged = arranged.tile((1, 1))
-        arranged = arranged.tile((block_size, -1))
+        arranged = arranged.tile((1, -1))
+        arranged.dtype = arranged.dtype.squeeze(0)
         
         return arranged
 
@@ -42,24 +32,21 @@ def arrangement(input, output, k, dims, block_size=None):
         if ndim == 2: 
             arranged = arranged.unsqueeze(0)
         arranged = arranged.flatten(end_dim=-2)
-        arranged = arranged.tile((1, 1, 1))
-        arranged = arranged.tile((block_size, -1, -1))
+        arranged = arranged.tile((1, -1, -1))
+        arranged.dtype = arranged.dtype.squeeze(0)
         
         return arranged
     
-    k = k % 4
-
-    
-    if k == 0:
+    if k % 4 == 0:
         input_arranged = _arrange_0(input)
         output_arranged = _arrange_0(output)
-    elif k == 1:
+    elif k % 4 == 1:
         input_arranged = _arrange_1_or_3(input, dims)
         output_arranged = _arrange_1_or_3(output, tuple(reversed(dims)))
-    elif k == 3:
+    elif k % 4 == 3:
         input_arranged = _arrange_1_or_3(input, tuple(reversed(dims)))
         output_arranged = _arrange_1_or_3(output, dims)
-    else:  # k == 2
+    else:  # k % 4 == 2
         input_arranged = _arrange_2(input, dims)
         output_arranged = _arrange_2(output, dims)
 
@@ -69,24 +56,21 @@ def application_0(input, output):
     output = input # noqa: F841
 
 def application_1_or_3(input, output):
-    m, n = input.shape
-    for i in range(m):
-        for j in range(n):
-            output[i, j] = input[i, n - 1 - j]  # noqa: F841
+    if input.shape[0] == 1:
+        output = input # noqa: F841
+    else:
+        output = ntl.flip(input, 0) # noqa: F841
+    output = ntl.flip(input, 0) # noqa: F841
 
 def application_2(input, output):
-    x, y, z = input.shape
-    for i in range(x):
-        for j in range(y):
-            for k in range(z):
-                output[i, j, k] = input[i, y - 1 - j, z - 1 - k]  # noqa: F841
+    output = ntl.flip(ntl.flip(input, 0), 1) # noqa: F841
 
-def premake(ndim, k=1, dims=(0, 1), dtype=None, block_size=None):
+def premake(ndim, k, dims, dtype=None, block_size=None):
     arrangement_ = functools.partial(arrangement, k=k, dims=dims, block_size=block_size)
 
     tensors = (
-        Tensor(ndim, dtype=dtype),
-        Tensor(ndim, dtype=dtype),
+        Tensor(ndim, dtype=dtype, shape_options={"constexpr": True}),
+        Tensor(ndim, dtype=dtype, shape_options={"constexpr": True}),
     )
 
     if k % 4 == 0:
@@ -98,30 +82,68 @@ def premake(ndim, k=1, dims=(0, 1), dtype=None, block_size=None):
 
     return arrangement_, application, tensors
 
-# dims = (0, 1)
-# k = 3
-# ndim = 4
-# # kernel = ninetoothed.make(functools.partial(arrangement, dims=dims, k=k), application_2, (Tensor(ndim), Tensor(ndim)))
-# kernel = ninetoothed.make(functools.partial(arrangement, dims=dims, k=k), application_1_or_3, (Tensor(ndim), Tensor(ndim)))
+
+# def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
+#     dim_size = input.shape[dim]
+#     dim_size_padded = 1
+#     while dim_size_padded < dim_size:
+#         dim_size_padded *= 2
+    
+#     if dim_size_padded == dim_size:
+#         return input
+    
+#     padded_shape = list(input.shape)
+#     padded_shape[dim] = dim_size_padded
+#     flattened_size = 1
+#     for s in padded_shape:
+#         flattened_size *= s
+#     # `infinicore.tensor` does not support `full`, so we create a tensor from a list instead.
+#     padded_input = torch.tensor([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
+#     # padded_input = torch.from_list([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
+#     padded_input = padded_input.view(padded_shape)
+#     padded_input.narrow(dim, dim_size_padded - dim_size, dim_size).copy_(input)
+    
+#     return padded_input
+
 
 # import torch
+# max_display = 20
+# dims = (0, 1)
+# k = 1
+# shape = (12, 1, 3, 54)
+# ndim = len(shape)
 # dtype = torch.float32
 # device = torch.device("cuda")
 
-# x = torch.arange(138*191*1*229, dtype=dtype, device=device).view(138, 191, 1, 229)
-# reference = torch.rot90(x, k=k, dims=dims)
-# y = torch.empty_like(reference)
+# size = 1
+# for dim in shape:
+#     size *= dim
+# input = torch.arange(size, dtype=dtype, device=device).view(shape)
+# ref = torch.rot90(input, k=k, dims=dims)
+# output = torch.empty_like(ref)
 
-# # print(y)
-# kernel(x, y)
+# from ntops.torch.utils import _cached_make
+# kernel = _cached_make(premake, input.dim(), k=k, dims=dims)
 
-# print(reference[0, 0, 0, :5])
-# print(y[0, 0, 0, :5])
-# # for i in range(y.shape[3]):
-# #     if not torch.allclose(y[:, :, :, i], reference[:, :, :, i]):
-# #         print(f"Mismatch at index {i}:")
-# #         print("y:", y[:, :, :, i])
-# #         print("reference:", reference[:, :, :, i])
-# #         break
-# # assert torch.allclose(y, x)
-# assert torch.allclose(y, reference)
+# if k == 1:
+#     input_prepared = _pad_to_next_power_of_2(input, dims[1])
+# elif k == 2:
+#     input_prepared = _pad_to_next_power_of_2(_pad_to_next_power_of_2(input, dims[0]), dims[1])
+# elif k == 3:
+#     input_prepared = _pad_to_next_power_of_2(input, dims[0])
+# else:  # k == 0
+#     input_prepared = input
+
+# kernel(input_prepared, output)
+
+# if size <= max_display:
+#     print("Input:", input)
+#     print("Output:", output)
+#     print("Reference:", ref)
+# else:
+#     # print only the first max_display elements for large tensors
+#     print("Input:", input.flatten()[:max_display])
+#     print("Output:", output.flatten()[:max_display])
+#     print("Reference:", ref.flatten()[:max_display])
+#     if not torch.allclose(output, ref):
+#         print("Output does not match reference!")

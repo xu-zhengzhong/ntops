@@ -4,6 +4,7 @@ import ninetoothed
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
 
+
 def arrangement(input, q, dim_size, output, dim, block_size=None):
     def _arrange_input_or_output(tensor, dim):
         ndim = tensor.ndim

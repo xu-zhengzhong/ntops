@@ -5,6 +5,7 @@ import ninetoothed.language as ntl
 
 from ntops.kernels.element_wise import arrangement
 
+
 def application(input, output):
     if input.dtype is ntl.float16:
         i_unint = ntl.cast(input, ntl.uint16, bitcast=True)

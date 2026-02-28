@@ -3,6 +3,7 @@ import torch
 import ntops
 from ntops.torch.utils import _cached_make
 
+
 def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
     dim_size = input.shape[dim]
     dim_size_padded = 1
