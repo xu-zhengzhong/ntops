@@ -16,6 +16,6 @@ def sgn(input, *, out=None):
         out_rm = torch.view_as_real(out)
 
         kernel = _cached_make(ntops.kernels.sgn.premake, input.ndim)
-        kernel(input, input, out_rm)
+        kernel(input, out_rm)
 
     return out
