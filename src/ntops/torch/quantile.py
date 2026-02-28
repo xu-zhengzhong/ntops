@@ -9,10 +9,10 @@ def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
     dim_size_padded = 1
     while dim_size_padded < dim_size:
         dim_size_padded *= 2
-    
+
     if dim_size_padded == dim_size:
         return input
-    
+
     padded_shape = list(input.shape)
     padded_shape[dim] = dim_size_padded
     flattened_size = 1
@@ -20,13 +20,16 @@ def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
         flattened_size *= s
     # `infinicore.tensor` does not support `full`, so we create a tensor from a list instead.
     # padded_input = torch.tensor([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
-    padded_input = torch.from_list([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
+    padded_input = torch.from_list(
+        [pad_value] * flattened_size, dtype=input.dtype, device=input.device
+    )
     padded_input = padded_input.view(padded_shape)
     padded_input.narrow(dim, 0, dim_size).copy_(input)
-    
+
     return padded_input
 
-def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None):
+
+def quantile(input, q, dim=None, keepdim=False, interpolation="linear", out=None):
     is_scalar = False
     if isinstance(q, float):
         # q = torch.tensor([q], dtype=input.dtype, device=input.device)
@@ -34,10 +37,10 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
         is_scalar = True
     elif q.ndim == 0:
         q = q.unsqueeze(0)
-    
+
     # If dim is None, input tensor will be flattened before computation.
     ndim = None
-    if dim == None:
+    if dim is None:
         ndim = input.ndim
         # `flatten` is not supported in `infinicore.tensor`, use `view` instead.
         flattened_size = 1
@@ -45,23 +48,23 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
             flattened_size *= s
         input = input.contiguous().view([flattened_size])
         dim = 0
-    
+
     # Pad the input and q tensors to the next power of 2 along the specified dimensions.
     input_padded = _pad_to_next_power_of_2(input, dim)
     q_padded = _pad_to_next_power_of_2(q, 0, pad_value=0.0)
-    
+
     copy_back = False
     if out is None:
         out_shape = list(input.shape)
         out_shape[dim] = 1
-        if keepdim == False:
+        if not keepdim:
             out_shape.pop(dim)
         elif ndim is not None:
             out_shape.extend([1] * (ndim - 1))
         out_shape.insert(0, q.shape[0])
         out = torch.empty(out_shape, dtype=input.dtype, device=input.device)
     else:
-        if out.is_contiguous() == False:
+        if not out.is_contiguous():
             # Non-contiguous tensor does not work right,
             # so we create a new contiguous tensor and copy back the result after computation.
             original_out = out
@@ -73,21 +76,23 @@ def quantile(input, q, dim=None, keepdim=False, interpolation='linear', out=None
             # the `output` to have at least 1 dimension. We can unsqueeze the `output`
             # to make it compatible with the application.
             out = out.unsqueeze(0)
-    
-    if keepdim == True:
+
+    if keepdim:
         out_adjust = out.squeeze(dim + 1)
     else:
         out_adjust = out
-    
-    kernel = _cached_make(ntops.kernels.quantile.premake, input.ndim, out_adjust.ndim, dim, interpolation)
-    
+
+    kernel = _cached_make(
+        ntops.kernels.quantile.premake, input.ndim, out_adjust.ndim, dim, interpolation
+    )
+
     kernel(input_padded, q_padded, input.shape[dim], out_adjust)
-    
+
     if is_scalar:
         out = out.squeeze(0)
-    
+
     if copy_back:
         original_out.copy_(out)
         out = original_out
-    
+
     return out

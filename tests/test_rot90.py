@@ -14,7 +14,7 @@ from tests.utils import generate_arguments
 def test_rot90(shape, k, dtype, device, rtol, atol):
     if len(shape) < 2:
         shape.append(2)
-    
+
     input = torch.randn(shape, dtype=dtype, device=device)
     k += random.randint(-100, 100) * 4
     dim_0 = random.randint(0, len(shape) - 1)

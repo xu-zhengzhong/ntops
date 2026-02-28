@@ -1,5 +1,4 @@
 import functools
-import ninetoothed
 
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
@@ -10,7 +9,7 @@ def arrangement(input, q, dim_size, output, dim, block_size=None):
         ndim = tensor.ndim
         if dim < 0:
             dim += ndim
-        
+
         non_target_dims = tuple(i for i in range(ndim) if i != dim)
 
         arranged = tensor.permute(non_target_dims + (dim,))
@@ -31,10 +30,11 @@ def arrangement(input, q, dim_size, output, dim, block_size=None):
 
     for _ in range(output_arranged.ndim):
         q_arranged = q_arranged.unsqueeze(0)
-    
+
     q_arranged = q_arranged.expand(output_arranged.shape)
 
     return input_arranged, q_arranged, dim_size, output_arranged
+
 
 def linear_application(input, q, dim_size, output):
     pos = ntl.cast(q * (dim_size - 1), ntl.float32)
@@ -46,7 +46,8 @@ def linear_application(input, q, dim_size, output):
     lower_value = ntl.gather(sorted, i, 0)
     higher_value = ntl.gather(sorted, j, 0)
 
-    output = lower_value + frac * (higher_value - lower_value) # noqa: F841
+    output = lower_value + frac * (higher_value - lower_value)  # noqa: F841
+
 
 def lower_application(input, q, dim_size, output):
     pos = ntl.cast(q * (dim_size - 1), ntl.float32)
@@ -55,7 +56,8 @@ def lower_application(input, q, dim_size, output):
     sorted = ntl.sort(input)
     lower_value = ntl.gather(sorted, i, 0)
 
-    output = lower_value # noqa: F841
+    output = lower_value  # noqa: F841
+
 
 def higher_application(input, q, dim_size, output):
     pos = ntl.cast(q * (dim_size - 1), ntl.float32)
@@ -64,7 +66,8 @@ def higher_application(input, q, dim_size, output):
     sorted = ntl.sort(input)
     higher_value = ntl.gather(sorted, j, 0)
 
-    output = higher_value # noqa: F841
+    output = higher_value  # noqa: F841
+
 
 def nearest_application(input, q, dim_size, output):
     pos = ntl.cast(q * (dim_size - 1), ntl.float32)
@@ -77,7 +80,8 @@ def nearest_application(input, q, dim_size, output):
     i = ntl.where((frac == 0.5) & (i % 2 == 1), ntl.minimum(i + 1, dim_size - 1), i)
 
     sorted = ntl.sort(input)
-    output = ntl.gather(sorted, i, 0) # noqa: F841
+    output = ntl.gather(sorted, i, 0)  # noqa: F841
+
 
 def midpoint_application(input, q, dim_size, output):
     pos = ntl.cast(q * (dim_size - 1), ntl.float32)
@@ -88,9 +92,10 @@ def midpoint_application(input, q, dim_size, output):
     lower_value = ntl.gather(sorted, i, 0)
     higher_value = ntl.gather(sorted, j, 0)
 
-    output = (higher_value + lower_value) / 2 # noqa: F841
+    output = (higher_value + lower_value) / 2  # noqa: F841
 
-def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None):
+
+def premake(in_ndim, out_ndim, dim, interpolation, dtype=None, block_size=None):
     arrangement_ = functools.partial(arrangement, dim=dim, block_size=block_size)
 
     tensors = (
@@ -100,48 +105,17 @@ def premake(in_ndim, out_ndim, dim, interpolation,  dtype=None, block_size=None)
         Tensor(out_ndim, dtype=dtype, shape_options={"constexpr": True}),
     )
 
-    if interpolation == 'linear':
+    if interpolation == "linear":
         application = linear_application
-    elif interpolation == 'lower':
+    elif interpolation == "lower":
         application = lower_application
-    elif interpolation == 'higher':
+    elif interpolation == "higher":
         application = higher_application
-    elif interpolation == 'nearest':
+    elif interpolation == "nearest":
         application = nearest_application
-    elif interpolation == 'midpoint':
+    elif interpolation == "midpoint":
         application = midpoint_application
     else:
         raise ValueError(f"Unsupported interpolation method: {interpolation}")
-    
+
     return arrangement_, application, tensors
-
-# dim = -1
-# interpolation = 'midpoint'
-# keepdim=False
-
-# import torch
-# dtype = torch.float32
-# device = torch.device("cuda")
-
-# torch.manual_seed(42)
-# x = torch.rand(2, 4, dtype=dtype, device=device)
-# # x, _ = torch.sort(x, dim=dim)
-# q = torch.tensor([0.25, 0.5, 0.75, 0.9], dtype=dtype, device=device)
-# ref = torch.quantile(x, q, dim=dim, interpolation=interpolation, keepdim=keepdim)
-# y = torch.empty_like(ref)
-
-# from ntops.torch.utils import _cached_make
-# # kernel = _cached_make(premake, x.dim() + 1, y.dim() + 1, dim, interpolation)
-
-# # kernel(x.unsqueeze(0), q, y.unsqueeze(-1))
-# kernel = _cached_make(premake, x.dim(), y.dim(), dim, interpolation)
-
-# kernel(x, q, x.shape[dim], y)
-
-# print("Input:")
-# print(x)
-# print("Output:")
-# print(y)
-# print("Reference:")
-# print(ref)
-# # assert torch.allclose(y, reference)

@@ -1,17 +1,18 @@
 import functools
-import ninetoothed
 
+import ninetoothed
 import ninetoothed.language as ntl
 from ninetoothed import Tensor
+
 
 def arrangement(input, descending, output, dim, block_size=None):
     if block_size is None:
         block_size = ninetoothed.block_size()
-    
+
     ndim = input.ndim
     if dim < 0:
         dim += ndim
-    
+
     non_target_dims = tuple(i for i in range(input.ndim) if i != dim)
 
     def _arrangement(input):
@@ -26,8 +27,10 @@ def arrangement(input, descending, output, dim, block_size=None):
 
     return _arrangement(input), descending, _arrangement(output)
 
+
 def application(input, descending, output):
-    output = ntl.sort(input, descending=descending) # noqa: F841
+    output = ntl.sort(input, descending=descending)  # noqa: F841
+
 
 def premake(ndim, dim, dtype=None, block_size=None):
     arrangement_ = functools.partial(arrangement, dim=dim, block_size=block_size)
@@ -35,10 +38,11 @@ def premake(ndim, dim, dtype=None, block_size=None):
     tensors = (
         Tensor(ndim, dtype=dtype, shape_options={"constexpr": True}),
         Tensor(0, constexpr=True),
-        Tensor(ndim, dtype=dtype, shape_options={"constexpr": True})
+        Tensor(ndim, dtype=dtype, shape_options={"constexpr": True}),
     )
 
     return arrangement_, application, tensors
+
 
 # import torch
 # dtype = torch.float32
