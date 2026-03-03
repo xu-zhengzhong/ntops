@@ -35,6 +35,7 @@ from ntops.torch.scaled_dot_product_attention import scaled_dot_product_attentio
 from ntops.torch.select_copy import select_copy
 from ntops.torch.sgn import sgn
 from ntops.torch.sigmoid import sigmoid
+from ntops.torch.sign import sign
 from ntops.torch.signbit import signbit
 from ntops.torch.silu import silu
 from ntops.torch.sin import sin
@@ -81,6 +82,7 @@ __all__ = [
     "select_copy",
     "sgn",
     "sigmoid",
+    "sign",
     "signbit",
     "silu",
     "sin",
