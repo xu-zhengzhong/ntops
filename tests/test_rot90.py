@@ -26,8 +26,4 @@ def test_rot90(shape, k, dtype, device, rtol, atol):
     ninetoothed_output = ntops.torch.rot90(input, k=k, dims=dims)
     reference_output = torch.rot90(input, k=k, dims=dims)
 
-    print("Input shape:", input.shape)
-    print("Output shape:", ninetoothed_output.shape)
-    print("Input:", input)
-    print("Output:", ninetoothed_output)
     assert torch.allclose(ninetoothed_output, reference_output, rtol=rtol, atol=atol)

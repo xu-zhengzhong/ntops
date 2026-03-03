@@ -1,39 +1,15 @@
 import torch
 
 import ntops
-from ntops.torch.utils import _cached_make
-
-
-def _pad_to_next_power_of_2(input, dim, pad_value=float("inf")):
-    dim_size = input.shape[dim]
-    dim_size_padded = 1
-    while dim_size_padded < dim_size:
-        dim_size_padded *= 2
-
-    if dim_size_padded == dim_size:
-        return input
-
-    padded_shape = list(input.shape)
-    padded_shape[dim] = dim_size_padded
-    flattened_size = 1
-    for s in padded_shape:
-        flattened_size *= s
-    # `infinicore.tensor` does not support `full`, so we create a tensor from a list instead.
-    # padded_input = torch.tensor([pad_value] * flattened_size, dtype=input.dtype, device=input.device)
-    padded_input = torch.from_list(
-        [pad_value] * flattened_size, dtype=input.dtype, device=input.device
-    )
-    padded_input = padded_input.view(padded_shape)
-    padded_input.narrow(dim, 0, dim_size).copy_(input)
-
-    return padded_input
+from ntops.torch.utils import _cached_make, _pad_dims_to_next_power_of_2
 
 
 def quantile(input, q, dim=None, keepdim=False, interpolation="linear", out=None):
     is_scalar = False
     if isinstance(q, float):
-        # q = torch.tensor([q], dtype=input.dtype, device=input.device)
-        q = torch.from_list([q], dtype=input.dtype, device=input.device)
+        q = torch.tensor([q], dtype=input.dtype, device=input.device)
+        # Use `from_list` method to create a tensor in infinicore
+        # q = torch.from_list([q], dtype=input.dtype, device=input.device)
         is_scalar = True
     elif q.ndim == 0:
         q = q.unsqueeze(0)
@@ -50,8 +26,8 @@ def quantile(input, q, dim=None, keepdim=False, interpolation="linear", out=None
         dim = 0
 
     # Pad the input and q tensors to the next power of 2 along the specified dimensions.
-    input_padded = _pad_to_next_power_of_2(input, dim)
-    q_padded = _pad_to_next_power_of_2(q, 0, pad_value=0.0)
+    input_padded = _pad_dims_to_next_power_of_2(input, dim, value=float("inf"))
+    q_padded = _pad_dims_to_next_power_of_2(q, 0)
 
     copy_back = False
     if out is None:
