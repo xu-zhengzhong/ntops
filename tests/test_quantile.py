@@ -15,7 +15,7 @@ from tests.utils import generate_arguments
 )
 @pytest.mark.parametrize(*generate_arguments())
 def test_quantile(shape, keepdim, interpolation, dtype, device, rtol, atol):
-    # torch.quantile 不支持 float16
+    # `torch.quantile` does not support float16.
     if dtype == torch.float16:
         return
 

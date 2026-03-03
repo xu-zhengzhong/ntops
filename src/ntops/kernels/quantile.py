@@ -7,6 +7,7 @@ from ninetoothed import Tensor
 def arrangement(input, q, dim_size, output, dim, block_size=None):
     def _arrange_input_or_output(tensor, dim):
         ndim = tensor.ndim
+
         if dim < 0:
             dim += ndim
 
@@ -72,7 +73,7 @@ def higher_application(input, q, dim_size, output):
 def nearest_application(input, q, dim_size, output):
     pos = ntl.cast(q * (dim_size - 1), ntl.float32)
 
-    # Rounding mode for `float` to `int` conversion is always towards zero,
+    # Rounding mode for float to int conversion is always towards zero,
     # we have to manually implement `rtne` (round to nearest, ties to even).
     i = ntl.cast(ntl.floor(pos), ntl.int32)
     frac = ntl.cast(pos - i, ntl.float32)

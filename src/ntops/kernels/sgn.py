@@ -23,6 +23,7 @@ def arrangement(input, output, block_size=None):
 def application(input, output):
     denominators = ntl.sqrt(input[0] * input[0] + input[1] * input[1])
     denominators = ntl.where(denominators == 0.0, 1.0, denominators)
+
     for i in range(input.shape[0]):
         output[i] = input[i] / denominators  # noqa: F841
 

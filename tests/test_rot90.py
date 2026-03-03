@@ -17,10 +17,13 @@ def test_rot90(shape, k, dtype, device, rtol, atol):
 
     input = torch.randn(shape, dtype=dtype, device=device)
     k += random.randint(-100, 100) * 4
+
     dim_0 = random.randint(0, len(shape) - 1)
     dim_1 = random.randint(0, len(shape) - 1)
+
     if dim_0 == dim_1:
         dim_1 = (dim_1 + 1) % len(shape)
+
     dims = (dim_0, dim_1)
 
     ninetoothed_output = ntops.torch.rot90(input, k=k, dims=dims)

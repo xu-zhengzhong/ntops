@@ -13,6 +13,7 @@ def arrangement(input, index, output, dim, block_size=None):
         output = output.unsqueeze(0)
     else:
         output = output.flatten()
+
     output_arranged = output.tile((1,))
     output_arranged.dtype = output_arranged.dtype.squeeze(0)
 
@@ -21,8 +22,10 @@ def arrangement(input, index, output, dim, block_size=None):
     else:
         if dim < 0:
             dim += input.ndim
+
         non_target_dims = tuple(i for i in range(input.ndim) if i != dim)
         input = input.permute(non_target_dims + (dim,))
+
     input_arranged = input.flatten(end_dim=-1)
     input_arranged = input_arranged.tile((1, -1))
     input_arranged.dtype = input_arranged.dtype.squeeze(0)

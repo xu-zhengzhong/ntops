@@ -29,8 +29,10 @@ def arrangement(input, output, k, dims, block_size=None):
 
     def _arrange_2(tensor, dims):
         arranged = tensor.permute(non_target_dims + dims)
+
         if ndim == 2:
             arranged = arranged.unsqueeze(0)
+
         arranged = arranged.flatten(end_dim=-2)
         arranged = arranged.tile((1, -1, -1))
         arranged.dtype = arranged.dtype.squeeze(0)
