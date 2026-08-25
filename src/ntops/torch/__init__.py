@@ -42,6 +42,11 @@ from ntops.torch.rotary_position_embedding import rotary_position_embedding
 from ntops.torch.round import round
 from ntops.torch.rsqrt import rsqrt
 from ntops.torch.scaled_dot_product_attention import scaled_dot_product_attention
+from ntops.torch.scaled_grouped_mm import (
+    ScalingType,
+    SwizzleType,
+    scaled_grouped_mm,
+)
 from ntops.torch.select_copy import select_copy
 from ntops.torch.sgn import sgn
 from ntops.torch.sigmoid import sigmoid
@@ -120,6 +125,9 @@ __all__ = [
     "round",
     "rsqrt",
     "scaled_dot_product_attention",
+    "ScalingType",
+    "SwizzleType",
+    "scaled_grouped_mm",
     "select_copy",
     "sgn",
     "sigmoid",
