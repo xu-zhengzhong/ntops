@@ -38,7 +38,6 @@ from ntops.torch.quantile import quantile
 from ntops.torch.relu import relu
 from ntops.torch.rms_norm import rms_norm
 from ntops.torch.rms_norm_gated import rms_norm_gated
-from ntops.torch.rms_norm_gated_optimized import rms_norm_gated_optimized
 from ntops.torch.rot90 import rot90
 from ntops.torch.rotary_position_embedding import rotary_position_embedding
 from ntops.torch.round import round
@@ -76,6 +75,16 @@ from ntops.torch.lp_pool1d import lp_pool1d
 from ntops.torch.lp_pool2d import lp_pool2d
 from ntops.torch.lp_pool3d import lp_pool3d
 from ntops.torch.max import max
+from ntops.torch.mla_rope_concat_and_cache import (
+    fused_mla_decode_q_concat_kv_cache_insert,
+    mla_rope_concat_and_cache,
+    mla_rope_concat_and_cache_reference,
+)
+from ntops.torch.mla_rope_kv_cache_write import (
+    fused_mla_rope_kv_cache_insert,
+    mla_rope_kv_cache_write,
+    mla_rope_kv_cache_write_reference,
+)
 
 __all__ = [
     "abs",
@@ -118,7 +127,6 @@ __all__ = [
     "relu",
     "rms_norm",
     "rms_norm_gated",
-    "rms_norm_gated_optimized",
     "rot90",
     "rotary_position_embedding",
     "round",
@@ -157,4 +165,10 @@ __all__ = [
     "lp_pool2d",
     "lp_pool3d",
     "max",
+    "mla_rope_concat_and_cache",
+    "mla_rope_concat_and_cache_reference",
+    "fused_mla_decode_q_concat_kv_cache_insert",
+    "mla_rope_kv_cache_write",
+    "mla_rope_kv_cache_write_reference",
+    "fused_mla_rope_kv_cache_insert",
 ]

@@ -38,7 +38,6 @@ from ntops.kernels import (
     relu,
     rms_norm,
     rms_norm_gated,
-    rms_norm_gated_optimized,
     rot90,
     rotary_position_embedding,
     round,
@@ -76,6 +75,8 @@ from ntops.kernels import (
     lp_pool2d,
     lp_pool3d,
     max,
+    mla_rope_concat_and_cache,
+    mla_rope_kv_cache_write,
 )
 
 __all__ = [
@@ -118,7 +119,6 @@ __all__ = [
     "relu",
     "rms_norm",
     "rms_norm_gated",
-    "rms_norm_gated_optimized",
     "rot90",
     "rotary_position_embedding",
     "round",
@@ -156,4 +156,6 @@ __all__ = [
     "lp_pool2d",
     "lp_pool3d",
     "max",
+    "mla_rope_concat_and_cache",
+    "mla_rope_kv_cache_write",
 ]
