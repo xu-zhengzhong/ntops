@@ -28,9 +28,11 @@ def _write_via_output_anchored_fusion(
     from ntops.torch.mla_rope_concat_and_cache import mla_rope_concat_and_cache
 
     num_tokens = slot_mapping.shape[0]
+    kv_c = kv_c[:num_tokens]
+    k_pe = k_pe[:num_tokens]
     mla_rope_concat_and_cache(
-        kv_c[:num_tokens].unsqueeze(1),
-        k_pe[:num_tokens].unsqueeze(1),
+        kv_c.unsqueeze(1),
+        k_pe.unsqueeze(1),
         kv_c,
         k_pe,
         kv_cache,

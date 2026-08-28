@@ -93,7 +93,7 @@ def test_mla_rope_kv_cache_write_strided_and_alias():
     tokens, latent, rope = 2, 8, 8
     kv_c = torch.randn(tokens, latent * 2, device=device, dtype=torch.float16)[:, ::2]
     k_pe = torch.randn(tokens, rope * 2, device=device, dtype=torch.float16)[:, ::2]
-    cache = torch.empty(
+    cache = torch.randn(
         4, 4, (latent + rope) * 2, device=device, dtype=torch.float16
     )[..., ::2]
     reference_cache = cache.clone()
@@ -137,9 +137,9 @@ def test_mla_rope_kv_cache_write_output_anchored_fallback(monkeypatch):
         module, "_requires_output_anchored_cache_write", lambda: True
     )
 
-    tokens, latent, rope = 3, 8, 8
-    kv_c = torch.randn(tokens, latent, device="cuda", dtype=torch.float16)
-    k_pe = torch.randn(tokens, rope, device="cuda", dtype=torch.float16)
+    source_tokens, latent, rope = 4, 8, 8
+    kv_c = torch.randn(source_tokens, latent, device="cuda", dtype=torch.float16)
+    k_pe = torch.randn(source_tokens, rope, device="cuda", dtype=torch.float16)
     cache = torch.randn(4, 4, latent + rope, device="cuda", dtype=torch.float16)
     reference_cache = cache.clone()
     slots = torch.tensor((0, -1, 5), device="cuda", dtype=torch.int64)
