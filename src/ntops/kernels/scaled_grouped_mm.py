@@ -148,13 +148,19 @@ def application_lookup(
         packed = (mat_b[k] + 0).to(ntl.int32)
         scale = ntl.exp2((scale_b[k] + 0).to(ntl.float32) - 127.0)
 
-        # A packed-byte lookup prevents the SSA emitter from duplicating the
-        # full E2M1 decode expression inside each block-dot operand.
         weight_even = (decode_even.source[packed] * scale).to(ntl.bfloat16)
         weight_odd = (decode_odd.source[packed] * scale).to(ntl.bfloat16)
+        activation_even = (mat_a_even[k] + 0).to(ntl.float32)
+        activation_odd = (mat_a_odd[k] + 0).to(ntl.float32)
+        weight_even = (weight_even + 0).to(ntl.float32)
+        weight_odd = (weight_odd + 0).to(ntl.float32)
 
-        accumulator += ntl.dot(mat_a_even[k], weight_even)
-        accumulator += ntl.dot(mat_a_odd[k], weight_odd)
+        accumulator += ntl.sum(
+            activation_even[:, :, None] * weight_even[None, :, :], axis=1
+        )
+        accumulator += ntl.sum(
+            activation_odd[:, :, None] * weight_odd[None, :, :], axis=1
+        )
 
     output = accumulator
 
@@ -168,24 +174,29 @@ def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
     jagged_dim = 1 if jagged else None
     # HIP uses the lookup path only. Specializing its matrix dimensions lets
     # Triton fold the repeated shape predicates before AMD LLVM codegen.
-    shape_options = {"constexpr": True} if lookup else None
+    dense_shape_options = {"constexpr": True} if lookup else None
+    activation_shape_options = (
+        ({"constexpr": True}, None, {"constexpr": True})
+        if lookup and jagged
+        else dense_shape_options
+    )
     common_tensors = (
         Tensor(
             3,
             dtype=torch.bfloat16,
             jagged_dim=jagged_dim,
             other=0,
-            shape_options=shape_options,
+            shape_options=activation_shape_options,
         ),
         Tensor(
             3,
             dtype=torch.bfloat16,
             jagged_dim=jagged_dim,
             other=0,
-            shape_options=shape_options,
+            shape_options=activation_shape_options,
         ),
-        Tensor(3, dtype=torch.uint8, other=0, shape_options=shape_options),
-        Tensor(3, dtype=torch.uint8, other=127, shape_options=shape_options),
+        Tensor(3, dtype=torch.uint8, other=0, shape_options=dense_shape_options),
+        Tensor(3, dtype=torch.uint8, other=127, shape_options=dense_shape_options),
     )
     lookup_tensors = (
         Tensor(shape=(256,), dtype=torch.float32, other=0),
@@ -196,7 +207,7 @@ def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
             3,
             dtype=torch.bfloat16,
             jagged_dim=jagged_dim,
-            shape_options=shape_options,
+            shape_options=activation_shape_options,
         ),
     )
     tensors = common_tensors + (lookup_tensors if lookup else ()) + output_tensor

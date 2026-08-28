@@ -260,14 +260,15 @@ def scaled_grouped_mm(
         return output
 
     # The SSA arithmetic decoder expands into a large block-dot expression on
-    # AMD. Use the compact lookup path and a smaller N tile only on HIP.
+    # AMD, and gfx936 codegen crashes on its BF16 MMAC lowering. Use a compact
+    # lookup decoder and an ordinary FP32 reduction on HIP.
     use_lookup = torch.version.hip is not None
     block_size_n = 16 if use_lookup else 64
     num_warps = 1 if use_lookup else 4
     kernel = _cached_make(
         ntops.kernels.scaled_grouped_mm.premake,
         jagged,
-        block_size_m=16,
+        block_size_m=1 if use_lookup else 16,
         block_size_n=block_size_n,
         lookup=use_lookup,
         num_warps=num_warps,

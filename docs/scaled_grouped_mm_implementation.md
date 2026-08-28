@@ -14,10 +14,10 @@ result `10 passed, 4 skipped` only proved Python validation and source generatio
 it did not launch the grouped GEMM kernel.
 
 The current implementation removes that private compiler patch and avoids
-`tl.dot_scaled`. It decodes packed MXFP4 values inside the kernel and accumulates
-with ordinary BF16 `dot` operations, a path supported by the stable Triton
-backends used on both target platforms. The numerical tests now run on HIP/DCU
-instead of being skipped.
+`tl.dot_scaled`. It decodes packed MXFP4 values inside the kernel. CoreX uses
+ordinary BF16 `dot` operations; HIP uses explicit FP32 multiply reductions so
+that its generated IR contains no AMD BF16 MMAC operation. The numerical tests
+now run on HIP/DCU instead of being skipped.
 
 This operator matches the public argument order of PyTorch
 `torch.nn.functional.scaled_grouped_mm`, but deliberately implements its W4A16
@@ -118,7 +118,7 @@ vLLM weights as `[G, N, K/2]` must provide the corresponding contiguous
 
 ## 4. Portable kernel design
 
-### 4.1 Why the kernel uses two dots
+### 4.1 Even/odd K decomposition
 
 Triton `dot` accepts BF16 blocks but not packed nibbles on every backend. A
 32-element MX scale group is therefore split into two 16-element K matrices:
@@ -129,8 +129,13 @@ A_odd  = A[..., 1, 3, ..., 31]
 B_even = decode(low_nibble(B_packed)) * scale
 B_odd  = decode(high_nibble(B_packed)) * scale
 
-acc += dot(A_even, B_even)
-acc += dot(A_odd,  B_odd)
+CoreX:
+  acc += dot(A_even, B_even)
+  acc += dot(A_odd,  B_odd)
+
+HIP:
+  acc += sum(A_even[:, :, None] * B_even[None, :, :], axis=1)
+  acc += sum(A_odd[:, :, None] * B_odd[None, :, :], axis=1)
 ```
 
 The public operator selects one of two single-kernel decoders without changing
@@ -142,12 +147,17 @@ materializes the full dequantized `[G, K, N]` weight.
 
 The table form is required for DCU compiler stability. The SSA emitter expands
 elementwise values inside a block-dot operand. The arithmetic decoder therefore
-duplicated every packed load, boundary mask, `where`, and `exp2` expression,
-creating a very large Triton AST that reached AMD `make_amdgcn` and crashed the
-compiler process. The lookup form reduces each dot operand to one packed load,
-one table gather, and one scale load. Its generated executable Triton source is
-about 58 KB and contains one `mat_b` load, one load from each decode table, no
-decode `tl.where`, and two dots for the validated `16x16` specialization.
+duplicated every packed load, boundary mask, `where`, and `exp2` expression and
+created a very large Triton AST. A first lookup revision reduced that expression
+substantially, but its LLIR still contained two
+`llvm.amdgcn.mmac.f32.16x16x16bf16` calls. AMD `make_amdgcn` continued to
+segfault even after reducing the tile to `16x16` and the launch to one wave.
+
+The current HIP path therefore avoids `dot` entirely. Its generated executable
+Triton source is about 31 KB and contains one packed load, one gather from each
+decode table, no decode `tl.where`, no `tl.dot`, and two FP32 reductions. The
+weights are rounded to BF16 before conversion to FP32, preserving the reference
+dequantization semantics without materializing the full `[G, K, N]` tensor.
 
 ### 4.2 Arrangement
 
@@ -161,35 +171,27 @@ The current platform configurations are fixed:
 
 ```text
 CoreX: BLOCK_M=16, BLOCK_N=64, num_warps=4, num_stages=1
-HIP:   BLOCK_M=16, BLOCK_N=16, num_warps=1, num_stages=1
+HIP:   BLOCK_M=1,  BLOCK_N=16, num_warps=1, num_stages=1
 ```
 
 The CoreX arithmetic configuration was selected from a bounded
-fixed-configuration comparison. HIP combines the lookup decoder with a smaller N
-tile to bound AMDGPU codegen and register pressure. Autotuning is intentionally
-not part of this revision: a candidate
+fixed-configuration comparison. HIP combines the lookup decoder with a single
+output row and a small N tile to keep the explicit reduction bounded. Autotuning
+is intentionally not part of this revision: a candidate
 that crashes an AMD compiler process cannot be caught by the Python autotuner.
 Platform-specific tuning should be added only after both backends have a known
 correct fixed configuration.
 
-The HIP lookup descriptors additionally mark tensor dimensions as compile-time
-specializations and declare both packed-byte decode tables with their exact
-length of 256. This does not constrain the public input sizes: Triton compiles
-and caches a specialization for each encountered shape. It does allow constant
-folding of the repeated shape predicates emitted by the SSA arrangement before
-AMD LLVM code generation. On the local Triton backend, for the tail-shape test
-`G=2, M=17, K=96, N=19`, this reduced TTIR from 77,653 to 47,630 bytes, TTGIR
-from 82,865 to 52,502 bytes, LLIR from 36,480 to 31,082 bytes, and the generated
-device binary from 15,312 to 8,616 bytes. These figures measure compiler IR
-complexity rather than DCU runtime performance; the DCU compile/run result must
-still be verified on the target machine.
+The HIP lookup descriptors additionally mark dense G/K/N dimensions as
+compile-time specializations and declare both packed-byte decode tables with
+their exact length of 256. Triton compiles and caches a specialization for each
+encountered shape, allowing repeated shape predicates to fold before AMD LLVM
+code generation. Routed M dimensions deliberately remain runtime values. Making
+the per-expert row count constexpr specializes it to the maximum sequence length,
+which lets padding programs for shorter experts overwrite later expert rows.
 
-The HIP tile uses one 64-thread wave. The previous four-wave lowering assigned
-256 threads to one `16x16` result tile, emitted repeated workgroup barriers around
-the dot operand layout conversions, and guarded the final store so that only the
-first wave wrote results. A single wave matches the granularity of the emitted
-`llvm.amdgcn.mmac.f32.16x16x16bf16` operation and removes the three redundant
-waves from AMD code generation. CoreX retains its independently measured
+The HIP tile uses one 64-thread wave and does not emit dot-operand layout
+conversions or `llvm.amdgcn.mmac` calls. CoreX retains its independently measured
 four-warp configuration.
 
 On Iluvatar, the MoE-shaped screening case `G=8, M=16, K=4096, N=4096` produced:
@@ -206,7 +208,7 @@ These arithmetic-decoder numbers are retained as the tile-selection record. A
 fresh run of the current dispatched CoreX path on the same shape measured
 `1.4627 ms` mean (`warmup=25`, `rep=100`). An experimental unconditional
 lookup path with `BLOCK_N=64` measured `4.2387 ms`, so the DCU compiler workaround
-is intentionally not applied to CoreX. HIP uses `16x16` until its compile/run
+is intentionally not applied to CoreX. HIP uses `1x16` until its compile/run
 stability and performance have been measured on the target device.
 
 ### 4.3 Removed private compiler dependency
@@ -222,7 +224,7 @@ That failed on the installed stable legacy compiler because
 `ninetoothed.backends` did not exist, and tied the operator to one internal SSA
 revision. Both dispatched implementations use normal DSL operations already
 used elsewhere in ntops: bitwise arithmetic or source indexing, `where`, `exp2`,
-`zeros`, dtype conversion, and `dot`.
+`zeros`, dtype conversion, `dot` on CoreX, and `sum` on HIP.
 
 Two frontend-compatibility details are also intentional:
 
@@ -270,8 +272,11 @@ Coverage includes:
 - raw byte storage and native packed dtypes when the installed PyTorch has them;
 - dtype, shape, recipe, option, and offset failures;
 - equivalent one-element list/default API forms and an all-zero-token return;
-- generated Python source containing exactly two ordinary dots, no `dot_scaled`,
-  no arithmetic-decoder `tl.where`, and no unresolved `ntl.` namespace.
+- generated CoreX Python source containing exactly two ordinary dots and no
+  `dot_scaled`;
+- generated HIP lookup source containing no dot/MMAC input, exactly two FP32
+  reductions, no arithmetic-decoder `tl.where`, and no unresolved `ntl.`
+  namespace.
 
 ### 6.2 Iluvatar result
 
@@ -324,8 +329,8 @@ hardware-equivalent performance baseline.
   BF16 matmul, clearly including dequantization time.
 - Consider accepting native scale swizzles and common `[G, N, K/2]` weight storage
   in a separate extension without changing current semantics.
-- Add a native backend path only behind capability dispatch; retain this portable
-  pair-of-dots path as the shared correctness implementation.
+- Add a native backend path only behind capability dispatch; retain the CoreX
+  pair-of-dots path and the HIP reduction path as correctness fallbacks.
 
 ## 8. Upstream references
 

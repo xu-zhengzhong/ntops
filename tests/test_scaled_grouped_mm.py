@@ -174,11 +174,13 @@ def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
     assert "ntl." not in source
 
 
-def test_scaled_grouped_mm_lookup_lowers_without_decode_tree():
+def test_scaled_grouped_mm_lookup_lowers_without_mmac_or_decode_tree():
     source = _generated_kernel_source(lookup=True)
 
     dot_count = source.count("tl.dot(") + source.count("triton.language.dot(")
-    assert dot_count == 2
+    sum_count = source.count("tl.sum(") + source.count("triton.language.sum(")
+    assert dot_count == 0
+    assert sum_count == 2
     assert "dot_scaled" not in source
     assert "ntl." not in source
     assert "tl.where(" not in source
