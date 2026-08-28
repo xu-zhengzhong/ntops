@@ -17,11 +17,11 @@ def _validate_inputs(
     if kv_c.ndim != 2:
         raise ValueError("kv_c must have shape [num_tokens, kv_lora_rank]")
     if k_pe.ndim not in (2, 3):
-        raise ValueError("k_pe must have shape [num_tokens, rope_dim] or [num_tokens, 1, rope_dim]")
-    if kv_cache.ndim != 3:
         raise ValueError(
-            "kv_cache must have shape [num_blocks, block_size, entry_dim]"
+            "k_pe must have shape [num_tokens, rope_dim] or [num_tokens, 1, rope_dim]"
         )
+    if kv_cache.ndim != 3:
+        raise ValueError("kv_cache must have shape [num_blocks, block_size, entry_dim]")
     if slot_mapping.ndim != 1 or positions.ndim != 1:
         raise ValueError("slot_mapping and positions must be one-dimensional")
     if cos_sin_cache.ndim != 2:
@@ -34,7 +34,9 @@ def _validate_inputs(
     if kv_c.shape[1] <= 0:
         raise ValueError("kv_c must have a positive latent width")
     if kv_c.shape[0] < num_tokens or k_pe.shape[0] < num_tokens:
-        raise ValueError("source tensors must contain at least slot_mapping.size(0) tokens")
+        raise ValueError(
+            "source tensors must contain at least slot_mapping.size(0) tokens"
+        )
     if positions.shape[0] != num_tokens:
         raise ValueError("positions must have one value per slot_mapping entry")
     if k_pe.ndim == 3 and k_pe.shape[1] != 1:
@@ -43,11 +45,12 @@ def _validate_inputs(
         raise ValueError("k_pe does not contain enough token values")
     if cos_sin_cache.shape[1] != rope_dim:
         raise ValueError(
-            "cos_sin_cache width must equal packed rope_dim "
-            "(cos[0:R/2] | sin[0:R/2])"
+            "cos_sin_cache width must equal packed rope_dim (cos[0:R/2] | sin[0:R/2])"
         )
     if kv_cache.shape[2] != kv_c.shape[1] + rope_dim:
-        raise ValueError("kv_cache entry dimension must equal latent width + rope width")
+        raise ValueError(
+            "kv_cache entry dimension must equal latent width + rope width"
+        )
     if kv_cache.shape[0] <= 0 or kv_cache.shape[1] <= 0:
         raise ValueError("kv_cache must have positive block and block-size dimensions")
     if slot_mapping.dtype != torch.int64:
@@ -87,7 +90,11 @@ def mla_rope_kv_cache_write(
     _validate_inputs(kv_c, k_pe, kv_cache, slot_mapping, positions, cos_sin_cache)
     if not kv_c.is_cuda:
         raise RuntimeError("mla_rope_kv_cache_write requires a CUDA device")
-    if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size <= 0:
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
         raise ValueError("block_size must be a positive integer")
 
     if k_pe.ndim == 3:
@@ -98,14 +105,24 @@ def mla_rope_kv_cache_write(
     num_tokens = slot_mapping.shape[0]
     if num_tokens == 0:
         return None
+
+    # Keep indirect source accesses on one contiguous specialization. Some
+    # Triton backends cannot compile the non-unit-stride indexed-store variant.
+    cache_output = kv_cache
+    kv_c, k_pe, slot_mapping, positions, cos_sin_cache = (
+        tensor if tensor.is_contiguous() else tensor.contiguous()
+        for tensor in (kv_c, k_pe, slot_mapping, positions, cos_sin_cache)
+    )
+    if not kv_cache.is_contiguous():
+        kv_cache = kv_cache.contiguous()
+
     latent = kv_c.shape[1]
     rope_dim = k_pe.shape[-1]
     entry_dim = latent + rope_dim
     tile_size = 1 << (block_size - 1).bit_length()
     num_entry_tiles = (entry_dim + tile_size - 1) // tile_size
-    # A view drives NineToothed's launch grid without allocating or writing an
-    # output tensor.  The kernel accesses the source-root kv_c directly.
-    driver = kv_c[:num_tokens, :1].expand(num_tokens, num_entry_tiles)
+    # A view drives NineToothed's launch grid without allocating an output.
+    driver = kv_c[:num_tokens, :1].expand(num_tokens, entry_dim)
     kernel = _cached_make(
         ntops.kernels.mla_rope_kv_cache_write.premake,
         latent,
@@ -133,6 +150,8 @@ def mla_rope_kv_cache_write(
         rope_dim,
         kv_cache.shape[1],
     )
+    if kv_cache is not cache_output:
+        cache_output.copy_(kv_cache)
     return None
 
 

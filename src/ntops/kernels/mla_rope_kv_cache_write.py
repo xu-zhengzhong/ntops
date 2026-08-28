@@ -9,9 +9,14 @@ per-head K/V in this kernel.  ``k_pe`` is the shared rotary key component and
 is rotated in-place in the write path.
 """
 
-import ninetoothed
 import ninetoothed.language as ntl
+
+import ninetoothed
 from ninetoothed import Tensor
+
+
+def _source_view(tensor):
+    return tensor.tile((1,) * tensor.ndim)
 
 
 def arrangement(
@@ -29,14 +34,21 @@ def arrangement(
     rope_dim,
     cache_block_size,
 ):
-    # ``driver`` is a zero-allocation [tokens, entry_tiles] view used only to
-    # make NineToothed launch one program per token/tile.  The actual cache
-    # write is performed through the source-root tensors below.
-    driver = driver.tile((1, 1))
-    # Keep one innermost scalar so application can explicitly touch the
-    # source-root pointer.  This prevents Triton autotune from keying on a
-    # freshly-created Python view object on every call.
+    # ``driver`` is a zero-allocation [tokens, entry_dim] view. One program
+    # owns one token row and a vector tile of cache features.
+    driver = driver.tile((1, tile_size.value))
     driver.dtype = driver.dtype.squeeze(0)
+    kv_c, k_pe, kv_cache, slot_mapping, positions, cos_sin_cache = (
+        _source_view(tensor)
+        for tensor in (
+            kv_c,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+        )
+    )
     return (
         driver,
         kv_c,
@@ -69,73 +81,36 @@ def application(
     rope_dim,
     cache_block_size,
 ):
-    driver_marker = driver[0]  # noqa: F841
-    pid = ntl.program_id(0)
-    token_idx = pid // num_entry_tiles
-    entry_tile_idx = pid % num_entry_tiles
-    feature = entry_tile_idx * tile_size + ntl.arange(0, tile_size)
+    token_idx = driver.offsets(0)
+    feature = driver.offsets(1)
     feature_valid = feature < entry_dim
-    slot = ntl.load(slot_mapping.data_ptr() + token_idx)
-    cache_valid = slot >= 0
-    block_idx = slot // cache_block_size
-    block_offset = slot % cache_block_size
-    cache_base = (
-        kv_cache.data_ptr()
-        + block_idx * kv_cache.stride(0)
-        + block_offset * kv_cache.stride(1)
-    )
-
     nope_mask = feature_valid & (feature < kv_lora_rank)
-    latent_idx = feature
-    latent_values = ntl.load(
-        kv_c.data_ptr()
-        + token_idx * kv_c.stride(0)
-        + latent_idx * kv_c.stride(1),
-        mask=cache_valid & nope_mask,
-        other=0,
-    )
-    ntl.store(
-        cache_base + latent_idx * kv_cache.stride(2),
-        latent_values,
-        mask=cache_valid & nope_mask,
-    )
+    rope_mask = feature_valid & (feature >= kv_lora_rank)
+    nope_feature = ntl.where(nope_mask, feature, 0)
+    rope_feature = ntl.where(rope_mask, feature - kv_lora_rank, 0)
+    pair = rope_feature // 2
+    even = (rope_feature & 1) == 0
 
-    rope_idx = feature - kv_lora_rank
-    rope_mask = feature_valid & (feature >= kv_lora_rank) & (rope_idx < rope_dim)
-    pair = rope_idx // 2
-    even = (rope_idx & 1) == 0
-    pair_mask = rope_mask & (pair * 2 + 1 < rope_dim)
-    kpe_base = k_pe.data_ptr() + token_idx * k_pe.stride(0)
-    kpe0 = ntl.load(
-        kpe_base + pair * 2 * k_pe.stride(1),
-        mask=cache_valid & pair_mask,
-        other=0,
-    )
-    kpe1 = ntl.load(
-        kpe_base + (pair * 2 + 1) * k_pe.stride(1),
-        mask=cache_valid & pair_mask,
-        other=0,
-    )
-
-    position = ntl.load(positions.data_ptr() + token_idx)
-    table_base = cos_sin_cache.data_ptr() + position * cos_sin_cache.stride(0)
-    table_stride = cos_sin_cache.stride(1)
-    cos = ntl.load(table_base + pair * table_stride, mask=pair_mask, other=1)
-    sin = ntl.load(
-        table_base + (rope_dim // 2 + pair) * table_stride,
-        mask=pair_mask,
-        other=0,
-    )
+    latent_value = kv_c.source[token_idx, nope_feature]
+    kpe0 = k_pe.source[token_idx, pair * 2]
+    kpe1 = k_pe.source[token_idx, pair * 2 + 1]
+    position = positions.source[token_idx].to(ntl.int64)
+    cos = cos_sin_cache.source[position, pair]
+    sin = cos_sin_cache.source[position, rope_dim // 2 + pair]
     rotated = ntl.where(
         even,
         kpe0 * cos - kpe1 * sin,
         kpe0 * sin + kpe1 * cos,
     )
-    ntl.store(
-        cache_base + (kv_lora_rank + rope_idx) * kv_cache.stride(2),
-        rotated.to(kv_c.dtype),
-        mask=cache_valid & rope_mask,
-    )
+    cache_value = ntl.where(nope_mask, latent_value, rotated).to(kv_c.dtype)
+
+    # Negative slots are padding. Indexed stores include source-shape bounds
+    # masks, so mapping padding to a negative block suppresses the write.
+    slot = slot_mapping.source[token_idx].to(ntl.int64)
+    write_slot = ntl.where(slot >= 0, slot, -1)
+    block_idx = write_slot // cache_block_size
+    block_offset = write_slot % cache_block_size
+    kv_cache.source[block_idx, block_offset, feature] = cache_value
 
 
 def premake(
@@ -151,9 +126,9 @@ def premake(
     dynamic = {"constexpr": True, "upper_bound": 2**20}
     tensors = (
         Tensor(
-            shape=(None, num_entry_tiles),
+            shape=(None, entry_dim),
             dtype=dtype,
-            shape_options=(dynamic, {"constexpr": True}),
+            shape_options=(dynamic, {}),
         ),
         Tensor(
             shape=(None, kv_lora_rank),
@@ -170,8 +145,8 @@ def premake(
             dtype=dtype,
             shape_options=(dynamic, dynamic, {"constexpr": True}),
         ),
-        Tensor(shape=(None,), dtype=ninetoothed.int64, shape_options=(dynamic,)),
-        Tensor(shape=(None,), dtype=ninetoothed.int64, shape_options=(dynamic,)),
+        Tensor(shape=(None,), dtype="int64", shape_options=(dynamic,)),
+        Tensor(shape=(None,), dtype="int64", shape_options=(dynamic,)),
         Tensor(
             shape=(None, rope_dim),
             dtype=cos_dtype or ninetoothed.float32,

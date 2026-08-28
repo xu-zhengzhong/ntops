@@ -55,17 +55,24 @@ vLLM 基础 `concat_and_cache_mla` 接收已经处理好的 `k_pe`；本实现�
 - `src/ntops/kernels/mla_rope_kv_cache_write.py`
 - `src/ntops/torch/mla_rope_kv_cache_write.py`
 
-每个 program 处理一个 `(token, entry_tile)`。latent tile 直接复制 `kv_c`；
-RoPE tile 加载共享 `k_pe`、cos 和 sin，FP32 旋转后写入 cache。cache 地址为：
+launch 域是 `[token, cache_feature]`，每个 program 处理一个 token 的一个向量
+tile。application 通过 `driver.offsets()` 取得 token/feature 坐标，再通过
+NineToothed `source[...]` 完成 latent、RoPE table 和 paged cache 的间接访问。
+这避免了 kernel 内显式混用 `program_id/arange`、SSA `index` 与 `i64`，可以由
+稳定版 legacy frontend 和 DCU SSA frontend 使用同一份实现。latent tile 直接
+复制 `kv_c`；RoPE tile 加载共享 `k_pe`、cos 和 sin，FP32 旋转后写入 cache。
+cache 地址为：
 
 ```text
 block_idx    = slot // cache_block_size
 block_offset = slot % cache_block_size
 ```
 
-kernel 支持动态 cache strides 和 `slot=-1`。一个从 `kv_c` 派生的零分配
-driver view 用于构造 `token x entry_tile` launch grid，并保持稳定的 Triton
-autotune key。
+kernel 支持 `slot=-1`。一个从 `kv_c` 派生的零分配 driver view 用于构造
+`token x cache_feature` launch grid，并保持稳定的 Triton autotune key。
+wrapper 对非连续 source/cache 进行连续化；cache 临时张量在 kernel 后回写到
+原 view。这隔离了部分 AMD Triton 无法编译的非单位 stride 间接 store
+specialization，连续的生产输入不会产生额外复制。
 
 正式 API 默认搜索全部 8 个组合：
 
@@ -105,9 +112,9 @@ PyTorch 未融合平均延迟除以 NineToothed 平均延迟。
 
 | 场景 | T | PyTorch RoPE mean (us) | PyTorch cache mean (us) | PyTorch 未融合 mean (us) | 最佳 `(warps, stages)` | NineToothed mean (us) | 加速比 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| decode | 1 | 34.813 | 26.417 | 63.219 | `(2, 2)` | 5.453 | 11.593x |
-| concurrent decode | 10 | 48.155 | 32.251 | 80.913 | `(1, 2)` | 10.883 | 7.435x |
-| long context | 2048 | 100.727 | 70.408 | 169.860 | `(1, 2)` | 35.502 | 4.785x |
+| decode | 1 | 34.662 | 26.444 | 63.101 | `(4, 2)` | 5.167 | 12.213x |
+| concurrent decode | 10 | 47.994 | 31.862 | 80.802 | `(2, 1)` | 7.060 | 11.445x |
+| long context | 2048 | 98.817 | 69.660 | 168.187 | `(1, 2)` | 35.707 | 4.710x |
 
 ```bash
 python benchmarks/bench_mla_rope_kv_cache_write.py
