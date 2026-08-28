@@ -161,7 +161,7 @@ The current platform configurations are fixed:
 
 ```text
 CoreX: BLOCK_M=16, BLOCK_N=64, num_warps=4, num_stages=1
-HIP:   BLOCK_M=16, BLOCK_N=16, num_warps=4, num_stages=1
+HIP:   BLOCK_M=16, BLOCK_N=16, num_warps=1, num_stages=1
 ```
 
 The CoreX arithmetic configuration was selected from a bounded
@@ -183,6 +183,14 @@ from 82,865 to 52,502 bytes, LLIR from 36,480 to 31,082 bytes, and the generated
 device binary from 15,312 to 8,616 bytes. These figures measure compiler IR
 complexity rather than DCU runtime performance; the DCU compile/run result must
 still be verified on the target machine.
+
+The HIP tile uses one 64-thread wave. The previous four-wave lowering assigned
+256 threads to one `16x16` result tile, emitted repeated workgroup barriers around
+the dot operand layout conversions, and guarded the final store so that only the
+first wave wrote results. A single wave matches the granularity of the emitted
+`llvm.amdgcn.mmac.f32.16x16x16bf16` operation and removes the three redundant
+waves from AMD code generation. CoreX retains its independently measured
+four-warp configuration.
 
 On Iluvatar, the MoE-shaped screening case `G=8, M=16, K=4096, N=4096` produced:
 

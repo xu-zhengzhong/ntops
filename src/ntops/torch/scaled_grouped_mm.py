@@ -263,13 +263,14 @@ def scaled_grouped_mm(
     # AMD. Use the compact lookup path and a smaller N tile only on HIP.
     use_lookup = torch.version.hip is not None
     block_size_n = 16 if use_lookup else 64
+    num_warps = 1 if use_lookup else 4
     kernel = _cached_make(
         ntops.kernels.scaled_grouped_mm.premake,
         jagged,
         block_size_m=16,
         block_size_n=block_size_n,
         lookup=use_lookup,
-        num_warps=4,
+        num_warps=num_warps,
         num_stages=1,
         max_num_configs=1,
     )
