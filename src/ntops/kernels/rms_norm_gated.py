@@ -74,10 +74,9 @@ def arrangement_no_gate(
 def application_silu_before(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    # ntl.cast is lowered by both the CoreX and Hygon DCU backends.
-    input_f32 = ntl.cast(input, ntl.float32)
-    gate_f32 = ntl.cast(gate, ntl.float32)
-    weight_f32 = ntl.cast(weight, ntl.float32)
+    input_f32 = (input + 0).to(ntl.float32)
+    gate_f32 = (gate + 0).to(ntl.float32)
+    weight_f32 = (weight + 0).to(ntl.float32)
     rms_value = ntl.sqrt(
         ntl.sum(input_f32 * input_f32) / num_normalized_elements + eps
     )
@@ -87,9 +86,9 @@ def application_silu_before(
 def application_silu_after(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    input_f32 = ntl.cast(input, ntl.float32)
-    gate_f32 = ntl.cast(gate, ntl.float32)
-    weight_f32 = ntl.cast(weight, ntl.float32)
+    input_f32 = (input + 0).to(ntl.float32)
+    gate_f32 = (gate + 0).to(ntl.float32)
+    weight_f32 = (weight + 0).to(ntl.float32)
     gated = input_f32 * _silu(gate_f32)
     rms_value = ntl.sqrt(ntl.sum(gated * gated) / num_normalized_elements + eps)
     output = gated / rms_value * weight_f32  # noqa: F841
@@ -98,9 +97,9 @@ def application_silu_after(
 def application_sigmoid_before(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    input_f32 = ntl.cast(input, ntl.float32)
-    gate_f32 = ntl.cast(gate, ntl.float32)
-    weight_f32 = ntl.cast(weight, ntl.float32)
+    input_f32 = (input + 0).to(ntl.float32)
+    gate_f32 = (gate + 0).to(ntl.float32)
+    weight_f32 = (weight + 0).to(ntl.float32)
     rms_value = ntl.sqrt(
         ntl.sum(input_f32 * input_f32) / num_normalized_elements + eps
     )
@@ -112,17 +111,17 @@ def application_sigmoid_before(
 def application_sigmoid_after(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    input_f32 = ntl.cast(input, ntl.float32)
-    gate_f32 = ntl.cast(gate, ntl.float32)
-    weight_f32 = ntl.cast(weight, ntl.float32)
+    input_f32 = (input + 0).to(ntl.float32)
+    gate_f32 = (gate + 0).to(ntl.float32)
+    weight_f32 = (weight + 0).to(ntl.float32)
     gated = input_f32 * _sigmoid(gate_f32)
     rms_value = ntl.sqrt(ntl.sum(gated * gated) / num_normalized_elements + eps)
     output = gated / rms_value * weight_f32  # noqa: F841
 
 
 def application_no_gate(input, weight, eps, output, num_normalized_elements):
-    input_f32 = ntl.cast(input, ntl.float32)
-    weight_f32 = ntl.cast(weight, ntl.float32)
+    input_f32 = (input + 0).to(ntl.float32)
+    weight_f32 = (weight + 0).to(ntl.float32)
     rms_value = ntl.sqrt(
         ntl.sum(input_f32 * input_f32) / num_normalized_elements + eps
     )
