@@ -48,6 +48,7 @@ from ntops.torch.scaled_grouped_mm import (
     SwizzleType,
     scaled_grouped_mm,
 )
+from ntops.torch.scaled_mm import scaled_mm
 from ntops.torch.select_copy import select_copy
 from ntops.torch.sgn import sgn
 from ntops.torch.sigmoid import sigmoid
@@ -140,6 +141,7 @@ __all__ = [
     "ScalingType",
     "SwizzleType",
     "scaled_grouped_mm",
+    "scaled_mm",
     "select_copy",
     "sgn",
     "sigmoid",
