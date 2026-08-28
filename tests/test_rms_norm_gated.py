@@ -78,6 +78,26 @@ def test_rms_norm_gated_without_gate_or_weight():
     torch.testing.assert_close(output, reference, rtol=2e-3, atol=2e-3)
 
 
+@skip_if_cuda_not_available
+def test_rms_norm_gated_hidden_size_larger_than_block_size():
+    input = torch.randn((2, 257), dtype=torch.float32, device="cuda")
+    z = torch.randn_like(input)
+    weight = torch.randn((257,), dtype=torch.float32, device="cuda")
+
+    output = ntops.torch.rms_norm_gated(input, z, weight, block_size=128)
+    reference = _reference_rms_norm_gated(
+        input,
+        z,
+        weight,
+        1e-5,
+        None,
+        False,
+        "swish",
+    )
+
+    torch.testing.assert_close(output, reference, rtol=2e-3, atol=2e-3)
+
+
 def test_rms_norm_gated_validates_arguments():
     input = torch.randn((2, 8))
 

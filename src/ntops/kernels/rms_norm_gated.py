@@ -9,16 +9,14 @@ def _silu(gate):
     return gate / (1 + ntl.exp(-gate))
 
 
+def _sigmoid(gate):
+    return 1 / (1 + ntl.exp(-gate))
+
+
 def _arrange_last_dim(tensor, block_size):
-    # Keep rows outside the hierarchy and reduce only the hidden dimension.
-    non_target_dims = tuple(range(tensor.ndim - 1))
-    inner_shape = (1,) * len(non_target_dims) + (block_size,)
-    outer_shape = (1,) * len(non_target_dims) + (-1,)
-    arranged = tensor.tile(inner_shape)
-    arranged = arranged.tile(outer_shape)
-    arranged.dtype = arranged.dtype.squeeze(non_target_dims)
-    arranged.dtype.dtype = arranged.dtype.dtype.squeeze(non_target_dims)
-    return arranged
+    # Keep each row in one program so the RMS reduction is local.
+    tile_shape = (1,) * (tensor.ndim - 1) + (block_size,)
+    return tensor.tile(tile_shape)
 
 
 def _arrange_group(tensor, group_size):
@@ -75,169 +73,58 @@ def arrangement_no_gate(
 def application_silu_before(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    rms = ntl.zeros(input.dtype.shape, dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        rms += input_i * input_i
-
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gate_i = ntl.cast(gate[i], ntl.float32)
-        normed_i = input_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        gated_i = _silu(gate_i)
-        output[i] = normed_i * gated_i
+    input_f32 = input.to(ntl.float32)
+    gate_f32 = gate.to(ntl.float32)
+    weight_f32 = weight.to(ntl.float32)
+    rms_value = ntl.sqrt(
+        ntl.sum(input_f32 * input_f32) / num_normalized_elements + eps
+    )
+    output = input_f32 / rms_value * weight_f32 * _silu(gate_f32)  # noqa: F841
 
 
 def application_silu_after(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    rms = ntl.zeros(input.dtype.shape, dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gate_i = ntl.cast(gate[i], ntl.float32)
-        gated_i = input_i * _silu(gate_i)
-        rms += gated_i * gated_i
-
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gate_i = ntl.cast(gate[i], ntl.float32)
-        gated_i = input_i * _silu(gate_i)
-        output_i = gated_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        output[i] = output_i
+    input_f32 = input.to(ntl.float32)
+    gate_f32 = gate.to(ntl.float32)
+    weight_f32 = weight.to(ntl.float32)
+    gated = input_f32 * _silu(gate_f32)
+    rms_value = ntl.sqrt(ntl.sum(gated * gated) / num_normalized_elements + eps)
+    output = gated / rms_value * weight_f32  # noqa: F841
 
 
 def application_sigmoid_before(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    rms = ntl.zeros(input.dtype.shape, dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        rms += input_i * input_i
-
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gate_i = ntl.cast(gate[i], ntl.float32)
-        normed_i = input_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        gated_i = ntl.sigmoid(gate_i)
-        output[i] = normed_i * gated_i
+    input_f32 = input.to(ntl.float32)
+    gate_f32 = gate.to(ntl.float32)
+    weight_f32 = weight.to(ntl.float32)
+    rms_value = ntl.sqrt(
+        ntl.sum(input_f32 * input_f32) / num_normalized_elements + eps
+    )
+    output = (  # noqa: F841
+        input_f32 / rms_value * weight_f32 * _sigmoid(gate_f32)
+    )
 
 
 def application_sigmoid_after(
     input, gate, weight, eps, output, num_normalized_elements
 ):
-    rms = ntl.zeros(input.dtype.shape, dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gate_i = ntl.cast(gate[i], ntl.float32)
-        gated_i = input_i * ntl.sigmoid(gate_i)
-        rms += gated_i * gated_i
-
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gate_i = ntl.cast(gate[i], ntl.float32)
-        gated_i = input_i * ntl.sigmoid(gate_i)
-        output_i = gated_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        output[i] = output_i
+    input_f32 = input.to(ntl.float32)
+    gate_f32 = gate.to(ntl.float32)
+    weight_f32 = weight.to(ntl.float32)
+    gated = input_f32 * _sigmoid(gate_f32)
+    rms_value = ntl.sqrt(ntl.sum(gated * gated) / num_normalized_elements + eps)
+    output = gated / rms_value * weight_f32  # noqa: F841
 
 
 def application_no_gate(input, weight, eps, output, num_normalized_elements):
-    rms = ntl.zeros(input.dtype.shape, dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        rms += input_i * input_i
-
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        output_i = input_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        output[i] = output_i
-
-
-def application_silu_before_group(
-    input, gate, weight, eps, output, num_normalized_elements
-):
-    rms = ntl.zeros((1,), dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        rms += input_i * input_i
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        normed_i = input_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        gated_i = _silu(ntl.cast(gate[i], ntl.float32))
-        output[i] = normed_i * gated_i
-
-
-def application_silu_after_group(
-    input, gate, weight, eps, output, num_normalized_elements
-):
-    rms = ntl.zeros((1,), dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        gated_i = ntl.cast(input[i], ntl.float32) * _silu(
-            ntl.cast(gate[i], ntl.float32)
-        )
-        rms += gated_i * gated_i
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gated_i = input_i * _silu(ntl.cast(gate[i], ntl.float32))
-        output_i = gated_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        output[i] = output_i
-
-
-def application_sigmoid_before_group(
-    input, gate, weight, eps, output, num_normalized_elements
-):
-    rms = ntl.zeros((1,), dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        rms += input_i * input_i
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        normed_i = input_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        gated_i = ntl.sigmoid(ntl.cast(gate[i], ntl.float32))
-        output[i] = normed_i * gated_i
-
-
-def application_sigmoid_after_group(
-    input, gate, weight, eps, output, num_normalized_elements
-):
-    rms = ntl.zeros((1,), dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        gated_i = ntl.cast(input[i], ntl.float32) * ntl.sigmoid(
-            ntl.cast(gate[i], ntl.float32)
-        )
-        rms += gated_i * gated_i
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        gated_i = input_i * ntl.sigmoid(ntl.cast(gate[i], ntl.float32))
-        output_i = gated_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        output[i] = output_i
-
-
-def application_no_gate_group(
-    input, weight, eps, output, num_normalized_elements
-):
-    rms = ntl.zeros((1,), dtype=ntl.float32)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        rms += input_i * input_i
-    rms_value = ntl.sqrt(ntl.sum(rms) / num_normalized_elements + eps)
-    for i in range(input.shape[0]):
-        input_i = ntl.cast(input[i], ntl.float32)
-        output_i = input_i / rms_value * ntl.cast(weight[i], ntl.float32)
-        output[i] = output_i
+    input_f32 = input.to(ntl.float32)
+    weight_f32 = weight.to(ntl.float32)
+    rms_value = ntl.sqrt(
+        ntl.sum(input_f32 * input_f32) / num_normalized_elements + eps
+    )
+    output = input_f32 / rms_value * weight_f32  # noqa: F841
 
 
 def premake(
@@ -266,57 +153,47 @@ def premake(
     if block_size is None:
         block_size = 128
 
+    tensor_shape = (None,) * (ndim - 1) + (hidden_size,)
+
     if has_gate:
         arrangement_ = functools.partial(
             arrangement,
             group_size=group_size,
-            block_size=block_size,
+            block_size=max(block_size, hidden_size),
         )
         tensors = (
-            Tensor(ndim, other=0, dtype=input_dtype),
-            Tensor(ndim, other=0, dtype=gate_dtype),
-            Tensor(ndim, dtype=weight_dtype),
+            Tensor(shape=tensor_shape, other=0, dtype=input_dtype),
+            Tensor(shape=tensor_shape, other=0, dtype=gate_dtype),
+            Tensor(shape=tensor_shape, dtype=weight_dtype),
             Tensor(0, dtype=ninetoothed.float64),
-            Tensor(ndim, dtype=output_dtype),
+            Tensor(shape=tensor_shape, dtype=output_dtype),
             Tensor(0, dtype=ninetoothed.float64),
         )
     else:
         arrangement_ = functools.partial(
             arrangement_no_gate,
             group_size=group_size,
-            block_size=block_size,
+            block_size=max(block_size, hidden_size),
         )
         tensors = (
-            Tensor(ndim, other=0, dtype=input_dtype),
-            Tensor(ndim, dtype=weight_dtype),
+            Tensor(shape=tensor_shape, other=0, dtype=input_dtype),
+            Tensor(shape=tensor_shape, dtype=weight_dtype),
             Tensor(0, dtype=ninetoothed.float64),
-            Tensor(ndim, dtype=output_dtype),
+            Tensor(shape=tensor_shape, dtype=output_dtype),
             Tensor(0, dtype=ninetoothed.float64),
         )
 
     if not has_gate:
-        application = (
-            application_no_gate_group
-            if group_size is not None
-            else application_no_gate
-        )
+        application = application_no_gate
     elif activation == "sigmoid":
         application = (
-            application_sigmoid_before_group
-            if group_size is not None and norm_before_gate
-            else application_sigmoid_after_group
-            if group_size is not None
-            else application_sigmoid_before
+            application_sigmoid_before
             if norm_before_gate
             else application_sigmoid_after
         )
     else:
         application = (
-            application_silu_before_group
-            if group_size is not None and norm_before_gate
-            else application_silu_after_group
-            if group_size is not None
-            else application_silu_before
+            application_silu_before
             if norm_before_gate
             else application_silu_after
         )
