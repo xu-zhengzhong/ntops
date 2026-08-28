@@ -105,6 +105,25 @@ def mla_rope_concat_and_cache(
     if positions.dtype == torch.int32:
         positions = positions.to(torch.int64)
     k_pe = k_pe.reshape(k_pe.shape[0], -1)
+
+    # Keep indirect source accesses on one contiguous specialization. Some
+    # Triton backends cannot compile the non-unit-stride indexed-store variant.
+    cache_output = kv_cache
+    ql_nope, q_pe, kv_c, k_pe, slot_mapping, positions, cos_sin_cache = (
+        tensor if tensor.is_contiguous() else tensor.contiguous()
+        for tensor in (
+            ql_nope,
+            q_pe,
+            kv_c,
+            k_pe,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+        )
+    )
+    if not kv_cache.is_contiguous():
+        kv_cache = kv_cache.contiguous()
+
     batch, num_heads, rope_dim = q_pe.shape
     kv_lora_rank = kv_c.shape[1]
     entry_dim = kv_lora_rank + rope_dim
@@ -149,6 +168,8 @@ def mla_rope_concat_and_cache(
         1 << (kv_lora_rank - 1).bit_length(),
         1 << (rope_dim - 1).bit_length(),
     )
+    if kv_cache is not cache_output:
+        cache_output.copy_(kv_cache)
     return output
 
 
