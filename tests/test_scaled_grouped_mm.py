@@ -128,9 +128,27 @@ def test_scaled_grouped_mm_decodes_every_e2m1_code_and_nibble_position():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
+def test_scaled_grouped_mm_packed_lookup_covers_every_byte():
+    from ntops.torch.scaled_grouped_mm import (
+        _PACKED_E2M1_EVEN,
+        _PACKED_E2M1_ODD,
+    )
+
+    nibble_values = _decode_mxfp4(
+        torch.arange(16, dtype=torch.uint8).repeat(2).reshape(1, 32, 1),
+        torch.full((1, 1, 1), 127, dtype=torch.uint8),
+    ).reshape(32)[:16].float()
+    packed = torch.arange(256, dtype=torch.int64)
+    even = torch.tensor(_PACKED_E2M1_EVEN)
+    odd = torch.tensor(_PACKED_E2M1_ODD)
+
+    torch.testing.assert_close(even, nibble_values[packed & 0xF], rtol=0, atol=0)
+    torch.testing.assert_close(odd, nibble_values[packed >> 4], rtol=0, atol=0)
+
+
+def _generated_kernel_source(lookup=False):
     kernel = ninetoothed.make(
-        *ntops.kernels.scaled_grouped_mm.premake(False),
+        *ntops.kernels.scaled_grouped_mm.premake(False, lookup=lookup),
         max_num_configs=1,
     )
 
@@ -144,10 +162,26 @@ def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
     else:
         source = pathlib.Path(kernel._source).read_text()
 
+    return source
+
+
+def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
+    source = _generated_kernel_source()
+
     dot_count = source.count("tl.dot(") + source.count("triton.language.dot(")
     assert dot_count == 2
     assert "dot_scaled" not in source
     assert "ntl." not in source
+
+
+def test_scaled_grouped_mm_lookup_lowers_without_decode_tree():
+    source = _generated_kernel_source(lookup=True)
+
+    dot_count = source.count("tl.dot(") + source.count("triton.language.dot(")
+    assert dot_count == 2
+    assert "dot_scaled" not in source
+    assert "ntl." not in source
+    assert "tl.where(" not in source
 
 
 def _cpu_inputs(group_count=3, total_m=None):

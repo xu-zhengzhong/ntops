@@ -133,8 +133,21 @@ acc += dot(A_even, B_even)
 acc += dot(A_odd,  B_odd)
 ```
 
-The full dequantized `[G, K, N]` weight is never materialized. Decoding, scaling,
-dot accumulation, and BF16 output write all occur in one generated kernel.
+The public operator selects one of two single-kernel decoders without changing
+its mathematical interface. CoreX retains the faster arithmetic E2M1 decoder.
+HIP uses two read-only 256-entry tables that map each packed byte directly to its
+low- and high-nibble values. Table values are exact in FP32, and the E8M0 scale
+is still applied inside the kernel before conversion to BF16. Neither path
+materializes the full dequantized `[G, K, N]` weight.
+
+The table form is required for DCU compiler stability. The SSA emitter expands
+elementwise values inside a block-dot operand. The arithmetic decoder therefore
+duplicated every packed load, boundary mask, `where`, and `exp2` expression,
+creating a very large Triton AST that reached AMD `make_amdgcn` and crashed the
+compiler process. The lookup form reduces each dot operand to one packed load,
+one table gather, and one scale load. Its generated executable Triton source is
+about 58 KB and contains one `mat_b` load, one load from each decode table, no
+decode `tl.where`, and two dots for the validated `16x16` specialization.
 
 ### 4.2 Arrangement
 
@@ -144,14 +157,16 @@ then produces exactly `K/32` blocks without floor-tiling the M dimension. This i
 important: applying `floor_mode` to the complete 3D tile drops the final M tile
 and can leave output rows or experts unwritten.
 
-The current cross-platform launch configuration is fixed:
+The current platform configurations are fixed:
 
 ```text
-BLOCK_M=16, BLOCK_N=64, num_warps=4, num_stages=1
+CoreX: BLOCK_M=16, BLOCK_N=64, num_warps=4, num_stages=1
+HIP:   BLOCK_M=16, BLOCK_N=16, num_warps=4, num_stages=1
 ```
 
-It was selected from a bounded fixed-configuration comparison while remaining a
-conservative common denominator for DCU validation. Autotuning is intentionally
+The CoreX arithmetic configuration was selected from a bounded
+fixed-configuration comparison. HIP combines the lookup decoder with a smaller N
+tile to bound AMDGPU codegen and register pressure. Autotuning is intentionally
 not part of this revision: a candidate
 that crashes an AMD compiler process cannot be caught by the Python autotuner.
 Platform-specific tuning should be added only after both backends have a known
@@ -167,10 +182,12 @@ On Iluvatar, the MoE-shaped screening case `G=8, M=16, K=4096, N=4096` produced:
 | 32 | 32 | 4 | 3.7424 ms |
 | 32 | 64 | 4 | 2.2697 ms |
 
-All candidates matched bit-for-bit in this comparison. `16x64` is about 2.42x
-faster than the initial `16x16` portable configuration. Although `16x128` reached
-1.2394 ms locally, it is not the shared default before a DCU compile/run confirms
-that the wider tile is safe on that backend.
+These arithmetic-decoder numbers are retained as the tile-selection record. A
+fresh run of the current dispatched CoreX path on the same shape measured
+`1.4627 ms` mean (`warmup=25`, `rep=100`). An experimental unconditional
+lookup path with `BLOCK_N=64` measured `4.2387 ms`, so the DCU compiler workaround
+is intentionally not applied to CoreX. HIP uses `16x16` until its compile/run
+stability and performance have been measured on the target device.
 
 ### 4.3 Removed private compiler dependency
 
@@ -183,17 +200,17 @@ ninetoothed.backends.emitters.ssa._emit_linalg_dot
 
 That failed on the installed stable legacy compiler because
 `ninetoothed.backends` did not exist, and tied the operator to one internal SSA
-revision. The portable implementation uses only normal DSL operations already
-used elsewhere in ntops: `cast`, bitwise operations, `where`, `exp2`, `zeros`, and
-`dot`.
+revision. Both dispatched implementations use normal DSL operations already
+used elsewhere in ntops: bitwise arithmetic or source indexing, `where`, `exp2`,
+`zeros`, dtype conversion, and `dot`.
 
 Two frontend-compatibility details are also intentional:
 
 - casts use method-style `.to(ntl.dtype)`: the DCU SSA emitter lowers this to
   `.to(tl.dtype)`, while `ntl.cast(value, ntl.dtype)` can leak an undefined
   runtime `ntl.dtype` value into generated Triton;
-- MXFP4 decode is written directly in `application`, because the legacy AST
-  inliner can lose statements from a nested multi-statement helper call.
+- the device lookup tables are passed as ordinary one-dimensional tensors and
+  accessed through `.source[...]`, a form accepted by both frontend paths.
 
 ## 5. PyTorch alignment and limits
 
@@ -228,12 +245,13 @@ Coverage includes:
 - uniform `G=2, M=17, K=96, N=19`, exercising M/N tails;
 - routed rows `(4, 0, 7)`, exercising a zero-token expert;
 - all 16 E2M1 codes in both nibble positions using an identity activation;
+- all 256 packed bytes in the low/high lookup table construction;
 - three independent K scale blocks;
 - raw byte storage and native packed dtypes when the installed PyTorch has them;
 - dtype, shape, recipe, option, and offset failures;
 - equivalent one-element list/default API forms and an all-zero-token return;
 - generated Python source containing exactly two ordinary dots, no `dot_scaled`,
-  and no unresolved `ntl.` namespace.
+  no arithmetic-decoder `tl.where`, and no unresolved `ntl.` namespace.
 
 ### 6.2 Iluvatar result
 
@@ -253,7 +271,7 @@ Command:
 PYTHONPATH=src pytest -q tests/test_scaled_grouped_mm.py
 ```
 
-Expected result for this environment is `14 passed, 2 skipped`. The skipped
+Expected result for this environment is `16 passed, 2 skipped`. The skipped
 cases are only the native `float4_e2m1fn_x2`/`float8_e8m0fnu` dtype variants,
 because PyTorch 2.7.1 does not define the former. The raw-byte uniform, routed,
 and exhaustive encoding tests all launch the accelerator kernel.

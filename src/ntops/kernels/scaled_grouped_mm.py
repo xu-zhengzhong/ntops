@@ -66,6 +66,34 @@ def arrangement(
     )
 
 
+def arrangement_lookup(
+    mat_a_even,
+    mat_a_odd,
+    mat_b,
+    scale_b,
+    decode_even,
+    decode_odd,
+    output,
+    block_size_m=None,
+    block_size_n=None,
+):
+    arranged = arrangement(
+        mat_a_even,
+        mat_a_odd,
+        mat_b,
+        scale_b,
+        output,
+        block_size_m=block_size_m,
+        block_size_n=block_size_n,
+    )
+    return (
+        *arranged[:-1],
+        decode_even.tile((1,)),
+        decode_odd.tile((1,)),
+        arranged[-1],
+    )
+
+
 def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
 
@@ -80,7 +108,9 @@ def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
         even_normal = (1.0 + 0.5 * even_mantissa) * ntl.exp2(
             (even_exponent + 0).to(ntl.float32) - 1.0
         )
-        even_magnitude = ntl.where(even_exponent == 0, 0.5 * even_mantissa, even_normal)
+        even_magnitude = ntl.where(
+            even_exponent == 0, 0.5 * even_mantissa, even_normal
+        )
         even_sign = ntl.where((even_code & 0x8) == 0, 1.0, -1.0)
         weight_even = (even_sign * even_magnitude * scale).to(ntl.bfloat16)
 
@@ -91,7 +121,9 @@ def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
         odd_normal = (1.0 + 0.5 * odd_mantissa) * ntl.exp2(
             (odd_exponent + 0).to(ntl.float32) - 1.0
         )
-        odd_magnitude = ntl.where(odd_exponent == 0, 0.5 * odd_mantissa, odd_normal)
+        odd_magnitude = ntl.where(
+            odd_exponent == 0, 0.5 * odd_mantissa, odd_normal
+        )
         odd_sign = ntl.where((odd_code & 0x8) == 0, 1.0, -1.0)
         weight_odd = (odd_sign * odd_magnitude * scale).to(ntl.bfloat16)
 
@@ -101,19 +133,52 @@ def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     output = accumulator
 
 
-def premake(jagged=False, block_size_m=None, block_size_n=None):
+def application_lookup(
+    mat_a_even,
+    mat_a_odd,
+    mat_b,
+    scale_b,
+    decode_even,
+    decode_odd,
+    output,
+):
+    accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
+
+    for k in range(mat_a_even.shape[0]):
+        packed = (mat_b[k] + 0).to(ntl.int32)
+        scale = ntl.exp2((scale_b[k] + 0).to(ntl.float32) - 127.0)
+
+        # A packed-byte lookup prevents the SSA emitter from duplicating the
+        # full E2M1 decode expression inside each block-dot operand.
+        weight_even = (decode_even.source[packed] * scale).to(ntl.bfloat16)
+        weight_odd = (decode_odd.source[packed] * scale).to(ntl.bfloat16)
+
+        accumulator += ntl.dot(mat_a_even[k], weight_even)
+        accumulator += ntl.dot(mat_a_odd[k], weight_odd)
+
+    output = accumulator
+
+
+def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
     arrangement_ = functools.partial(
-        arrangement,
+        arrangement_lookup if lookup else arrangement,
         block_size_m=block_size_m,
         block_size_n=block_size_n,
     )
     jagged_dim = 1 if jagged else None
-    tensors = (
+    common_tensors = (
         Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim, other=0),
         Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim, other=0),
         Tensor(3, dtype=torch.uint8, other=0),
         Tensor(3, dtype=torch.uint8, other=127),
+    )
+    lookup_tensors = (
+        Tensor(1, dtype=torch.float32, other=0),
+        Tensor(1, dtype=torch.float32, other=0),
+    )
+    output_tensor = (
         Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim),
     )
+    tensors = common_tensors + (lookup_tensors if lookup else ()) + output_tensor
 
-    return arrangement_, application, tensors
+    return arrangement_, application_lookup if lookup else application, tensors
