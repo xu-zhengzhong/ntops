@@ -187,9 +187,11 @@ revision. The portable implementation uses only normal DSL operations already
 used elsewhere in ntops: `cast`, bitwise operations, `where`, `exp2`, `zeros`, and
 `dot`.
 
-Two stable-frontend details are also intentional:
+Two frontend-compatibility details are also intentional:
 
-- casts use `ntl.cast` rather than method-style `.to(...)`;
+- casts use method-style `.to(ntl.dtype)`: the DCU SSA emitter lowers this to
+  `.to(tl.dtype)`, while `ntl.cast(value, ntl.dtype)` can leak an undefined
+  runtime `ntl.dtype` value into generated Triton;
 - MXFP4 decode is written directly in `application`, because the legacy AST
   inliner can lose statements from a nested multi-statement helper call.
 
@@ -230,7 +232,8 @@ Coverage includes:
 - raw byte storage and native packed dtypes when the installed PyTorch has them;
 - dtype, shape, recipe, option, and offset failures;
 - equivalent one-element list/default API forms and an all-zero-token return;
-- generated source containing exactly two ordinary dots and no `dot_scaled`.
+- generated Python source containing exactly two ordinary dots, no `dot_scaled`,
+  and no unresolved `ntl.` namespace.
 
 ### 6.2 Iluvatar result
 

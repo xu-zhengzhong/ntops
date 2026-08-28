@@ -135,7 +135,11 @@ def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
     )
 
     if hasattr(kernel, "_compilation"):
-        sources = kernel._compilation.artifact.sources.values()
+        sources = (
+            value
+            for name, value in kernel._compilation.artifact.sources.items()
+            if name.endswith(".py")
+        )
         source = "\n".join(str(value) for value in sources)
     else:
         source = pathlib.Path(kernel._source).read_text()
@@ -143,6 +147,7 @@ def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
     dot_count = source.count("tl.dot(") + source.count("triton.language.dot(")
     assert dot_count == 2
     assert "dot_scaled" not in source
+    assert "ntl." not in source
 
 
 def _cpu_inputs(group_count=3, total_m=None):

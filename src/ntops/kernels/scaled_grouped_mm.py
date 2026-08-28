@@ -70,30 +70,30 @@ def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
 
     for k in range(mat_a_even.shape[0]):
-        packed = ntl.cast(mat_b[k] + 0, ntl.int32)
-        scale = ntl.exp2(ntl.cast(scale_b[k] + 0, ntl.float32) - 127.0)
+        packed = (mat_b[k] + 0).to(ntl.int32)
+        scale = ntl.exp2((scale_b[k] + 0).to(ntl.float32) - 127.0)
 
         even_code = packed & 0xF
         even_magnitude_code = even_code & 0x7
         even_exponent = even_magnitude_code >> 1
-        even_mantissa = ntl.cast(even_magnitude_code & 1, ntl.float32)
+        even_mantissa = ((even_magnitude_code & 1) + 0).to(ntl.float32)
         even_normal = (1.0 + 0.5 * even_mantissa) * ntl.exp2(
-            ntl.cast(even_exponent, ntl.float32) - 1.0
+            (even_exponent + 0).to(ntl.float32) - 1.0
         )
         even_magnitude = ntl.where(even_exponent == 0, 0.5 * even_mantissa, even_normal)
         even_sign = ntl.where((even_code & 0x8) == 0, 1.0, -1.0)
-        weight_even = ntl.cast(even_sign * even_magnitude * scale, ntl.bfloat16)
+        weight_even = (even_sign * even_magnitude * scale).to(ntl.bfloat16)
 
         odd_code = (packed >> 4) & 0xF
         odd_magnitude_code = odd_code & 0x7
         odd_exponent = odd_magnitude_code >> 1
-        odd_mantissa = ntl.cast(odd_magnitude_code & 1, ntl.float32)
+        odd_mantissa = ((odd_magnitude_code & 1) + 0).to(ntl.float32)
         odd_normal = (1.0 + 0.5 * odd_mantissa) * ntl.exp2(
-            ntl.cast(odd_exponent, ntl.float32) - 1.0
+            (odd_exponent + 0).to(ntl.float32) - 1.0
         )
         odd_magnitude = ntl.where(odd_exponent == 0, 0.5 * odd_mantissa, odd_normal)
         odd_sign = ntl.where((odd_code & 0x8) == 0, 1.0, -1.0)
-        weight_odd = ntl.cast(odd_sign * odd_magnitude * scale, ntl.bfloat16)
+        weight_odd = (odd_sign * odd_magnitude * scale).to(ntl.bfloat16)
 
         accumulator += ntl.dot(mat_a_even[k], weight_even)
         accumulator += ntl.dot(mat_a_odd[k], weight_odd)
