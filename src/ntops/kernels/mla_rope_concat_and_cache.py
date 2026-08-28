@@ -42,8 +42,8 @@ def arrangement(
     rope_dim_p2,
 ):
     # One program owns one (token, head) row, while the last dimension is a
-    # vector tile.  Source tensors stay at their roots so their pointers and
-    # strides can be used for the indirect paged-cache write below.
+    # vector tile. Unit-tile views retain each input's source root while making
+    # indirect source indexing portable across the legacy and SSA frontends.
     output = output.tile((1, 1, tile_size_value.value))
     output.dtype = output.dtype.squeeze((0, 1))
     ql_nope, q_pe, kv_c, k_pe, kv_cache, slot_mapping, positions, cos_sin_cache = (
