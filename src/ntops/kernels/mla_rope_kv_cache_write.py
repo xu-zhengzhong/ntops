@@ -34,8 +34,9 @@ def arrangement(
     rope_dim,
     cache_block_size,
 ):
-    # ``driver`` is a zero-allocation [tokens, entry_dim] view. One program
-    # owns one token row and a vector tile of cache features.
+    # ``driver`` aliases kv_c[:, :1]. Tiling its singleton feature dimension
+    # over the full cache entry gives the side-effecting cache store a stable
+    # token/feature launch domain on both the legacy and SSA frontends.
     driver = driver.tile((1, tile_size.value))
     driver.dtype = driver.dtype.squeeze(0)
     kv_c, k_pe, kv_cache, slot_mapping, positions, cos_sin_cache = (
@@ -104,6 +105,11 @@ def application(
     )
     cache_value = ntl.where(nope_mask, latent_value, rotated).to(kv_c.dtype)
 
+    # Mark driver as the primary SSA output. Only feature zero is in driver's
+    # source bounds, where cache_value is exactly the original kv_c[:, 0], so
+    # this is a no-op write and does not change the public in-place semantics.
+    driver = cache_value  # noqa: F841
+
     # Negative slots are padding. Indexed stores include source-shape bounds
     # masks, so mapping padding to a negative block suppresses the write.
     slot = slot_mapping.source[token_idx].to(ntl.int64)
@@ -126,9 +132,9 @@ def premake(
     dynamic = {"constexpr": True, "upper_bound": 2**20}
     tensors = (
         Tensor(
-            shape=(None, entry_dim),
+            shape=(None, 1),
             dtype=dtype,
-            shape_options=(dynamic, {}),
+            shape_options=(dynamic, {"constexpr": True}),
         ),
         Tensor(
             shape=(None, kv_lora_rank),

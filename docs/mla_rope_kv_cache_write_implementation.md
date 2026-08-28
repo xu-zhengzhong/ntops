@@ -55,8 +55,8 @@ vLLM 基础 `concat_and_cache_mla` 接收已经处理好的 `k_pe`；本实现�
 - `src/ntops/kernels/mla_rope_kv_cache_write.py`
 - `src/ntops/torch/mla_rope_kv_cache_write.py`
 
-launch 域是 `[token, cache_feature]`，每个 program 处理一个 token 的一个向量
-tile。application 通过 `driver.offsets()` 取得 token/feature 坐标，再通过
+launch 域是 `[token, tile_feature]`，tile 宽度至少为完整 cache entry 的下一个
+2 的幂。application 通过 `driver.offsets()` 取得 token/feature 坐标，再通过
 NineToothed `source[...]` 完成 latent、RoPE table 和 paged cache 的间接访问。
 这避免了 kernel 内显式混用 `program_id/arange`、SSA `index` 与 `i64`，可以由
 稳定版 legacy frontend 和 DCU SSA frontend 使用同一份实现。latent tile 直接
@@ -68,11 +68,13 @@ block_idx    = slot // cache_block_size
 block_offset = slot % cache_block_size
 ```
 
-kernel 支持 `slot=-1`。一个从 `kv_c` 派生的零分配 driver view 用于构造
-`token x cache_feature` launch grid，并保持稳定的 Triton autotune key。
-wrapper 对非连续 source/cache 进行连续化；cache 临时张量在 kernel 后回写到
-原 view。这隔离了部分 AMD Triton 无法编译的非单位 stride 间接 store
-specialization，连续的生产输入不会产生额外复制。
+kernel 支持 `slot=-1`。`kv_c[:T, :1]` 是零分配 driver，也是 SSA 的主输出
+根；feature 0 将原始 `kv_c[:, 0]` 等值写回，其他 lane 仅执行 cache 副作用
+写入。这个 no-op 输出使 SSA 按 token 而不是按整个 cache capacity 生成 launch
+grid，同时避免原 stride=0 `expand` driver 的错误索引。wrapper 对非连续
+source/cache 进行连续化；cache 临时张量在 kernel 后回写到原 view。这隔离了
+部分 AMD Triton 无法编译的非单位 stride 间接 store specialization，连续的
+生产输入不会产生额外复制。
 
 正式 API 默认搜索全部 8 个组合：
 
@@ -112,17 +114,18 @@ PyTorch 未融合平均延迟除以 NineToothed 平均延迟。
 
 | 场景 | T | PyTorch RoPE mean (us) | PyTorch cache mean (us) | PyTorch 未融合 mean (us) | 最佳 `(warps, stages)` | NineToothed mean (us) | 加速比 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| decode | 1 | 34.662 | 26.444 | 63.101 | `(4, 2)` | 5.167 | 12.213x |
-| concurrent decode | 10 | 47.994 | 31.862 | 80.802 | `(2, 1)` | 7.060 | 11.445x |
-| long context | 2048 | 98.817 | 69.660 | 168.187 | `(1, 2)` | 35.707 | 4.710x |
+| decode | 1 | 34.832 | 26.582 | 63.192 | `(4, 1)` | 8.815 | 7.168x |
+| concurrent decode | 10 | 48.119 | 32.186 | 80.984 | `(4, 1)` | 9.850 | 8.221x |
+| long context | 2048 | 100.371 | 70.648 | 170.537 | `(1, 1)` | 19.117 | 8.921x |
 
 ```bash
 python benchmarks/bench_mla_rope_kv_cache_write.py
 ```
 
-长上下文主要受 `kv_c` 写带宽限制；短输入则由 kernel launch、RoPE 和 cache
-scatter 的固定开销主导。不同输入选择了不同配置，因此部署时保留按 key
-自动调优比固定一组 launch 参数更合适。
+完整 entry tile 让每个 token 只需要一个逻辑 tile，长上下文下显著减少了
+program 数量；decode 的 1024-lane tile 利用率较低，因此短输入延迟有所增加。
+不同输入选择了不同配置，因此部署时保留按 key 自动调优比固定一组 launch
+参数更合适。
 
 ## 6. 支持边界
 

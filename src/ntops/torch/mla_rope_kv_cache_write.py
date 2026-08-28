@@ -119,10 +119,14 @@ def mla_rope_kv_cache_write(
     latent = kv_c.shape[1]
     rope_dim = k_pe.shape[-1]
     entry_dim = latent + rope_dim
-    tile_size = 1 << (block_size - 1).bit_length()
+    tile_size = max(
+        1 << (block_size - 1).bit_length(),
+        1 << (entry_dim - 1).bit_length(),
+    )
     num_entry_tiles = (entry_dim + tile_size - 1) // tile_size
-    # A view drives NineToothed's launch grid without allocating an output.
-    driver = kv_c[:num_tokens, :1].expand(num_tokens, entry_dim)
+    # The singleton view is also the SSA output root. The kernel writes its
+    # original feature-zero value back, making the operation a semantic no-op.
+    driver = kv_c[:num_tokens, :1]
     kernel = _cached_make(
         ntops.kernels.mla_rope_kv_cache_write.premake,
         latent,

@@ -75,12 +75,17 @@ def _torch_cache_only(inputs, k_rot):
 
 
 def _kernel_handle(inputs):
+    entry_dim = KV_LORA_RANK + ROPE_DIM
+    tile_size = max(
+        1 << (TILE_SIZE - 1).bit_length(),
+        1 << (entry_dim - 1).bit_length(),
+    )
     return _cached_make(
         ntops.kernels.mla_rope_kv_cache_write.premake,
         KV_LORA_RANK,
         ROPE_DIM,
         dtype=DTYPE,
-        block_size=TILE_SIZE,
+        block_size=tile_size,
         cache_block_size=CACHE_BLOCK_SIZE,
         cos_dtype=inputs[-1].dtype,
         num_warps=AUTOTUNE_WARPS,
