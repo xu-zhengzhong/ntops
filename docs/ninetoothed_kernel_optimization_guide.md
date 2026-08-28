@@ -11,6 +11,11 @@
 3. 如何把 Triton 层面的优化思路表达成 NineToothed arrangement/application；
 4. 如何公平地执行 autotune、计算加速比并记录最佳配置。
 
+需要让同一份 kernel 同时运行在海光 DCU 与天数平台时，还应配合阅读
+[`ninetoothed_cross_platform_implementation_guide.md`](ninetoothed_cross_platform_implementation_guide.md)，
+其中集中说明 legacy/SSA lowering、HIP/CoreX 公共子集、进程级编译失败隔离和
+双平台验收要求。
+
 案例来自本仓库的三个融合算子：
 
 - `rms_norm_gated`：短归约、门控和逐元素计算融合；
