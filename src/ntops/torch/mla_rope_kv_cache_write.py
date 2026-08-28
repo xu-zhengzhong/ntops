@@ -6,6 +6,44 @@ import ntops
 from ntops.torch.utils import _cached_make
 
 
+def _requires_output_anchored_cache_write():
+    return torch.version.hip is not None
+
+
+def _write_via_output_anchored_fusion(
+    kv_c,
+    k_pe,
+    kv_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    block_size,
+    num_warps,
+    num_stages,
+    max_num_configs,
+):
+    # AMD's Triton backend cannot compile the side-effect-only cache writer.
+    # Reuse the output-anchored fusion already supported by that backend with
+    # one synthetic query head; its cache update has identical semantics.
+    from ntops.torch.mla_rope_concat_and_cache import mla_rope_concat_and_cache
+
+    num_tokens = slot_mapping.shape[0]
+    mla_rope_concat_and_cache(
+        kv_c[:num_tokens].unsqueeze(1),
+        k_pe[:num_tokens].unsqueeze(1),
+        kv_c,
+        k_pe,
+        kv_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        block_size=block_size,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        max_num_configs=max_num_configs,
+    )
+
+
 def _validate_inputs(
     kv_c,
     k_pe,
@@ -104,6 +142,20 @@ def mla_rope_kv_cache_write(
 
     num_tokens = slot_mapping.shape[0]
     if num_tokens == 0:
+        return None
+    if _requires_output_anchored_cache_write():
+        _write_via_output_anchored_fusion(
+            kv_c,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+            block_size,
+            num_warps,
+            num_stages,
+            max_num_configs,
+        )
         return None
 
     # Keep indirect source accesses on one contiguous specialization. Some

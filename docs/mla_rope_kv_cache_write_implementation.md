@@ -76,6 +76,12 @@ source/cache 进行连续化；cache 临时张量在 kernel 后回写到原 view
 部分 AMD Triton 无法编译的非单位 stride 间接 store specialization，连续的
 生产输入不会产生额外复制。
 
+AMD/DCU 使用输出锚定路径：wrapper 将 `kv_c` 和 `k_pe` 视为一个 query head，
+复用已经通过 DCU 验证的 `mla_rope_concat_and_cache` 融合 kernel，并丢弃额外的
+query 输出。该 kernel 内的 `[kv_c | RoPE(k_pe)]` paged-cache 写入与 cache-only
+接口完全相同，但真实输出张量使 SSA/AMD 后端不需要 lower side-effect-only
+launch。CUDA 路径仍直接调用 cache-only kernel，不承担这部分额外输出开销。
+
 正式 API 默认搜索全部 8 个组合：
 
 ```text
@@ -94,7 +100,7 @@ padding source、非连续输入/cache 和 vLLM 风格 alias：
 pytest -q tests/test_mla_rope_kv_cache_write.py
 ```
 
-结果：`8 passed`。
+结果：`9 passed`，其中一个测例在 CUDA 上强制执行 DCU 输出锚定路径。
 
 ## 5. 分阶段与自动调优性能
 

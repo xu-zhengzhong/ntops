@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 import torch
 
@@ -122,4 +124,47 @@ def test_mla_rope_kv_cache_write_strided_and_alias():
     assert result is None
     assert reference is None
     assert torch.allclose(cache, reference_cache, rtol=2e-3, atol=2e-3)
-    assert ntops.torch.fused_mla_rope_kv_cache_insert is ntops.torch.mla_rope_kv_cache_write
+    assert (
+        ntops.torch.fused_mla_rope_kv_cache_insert
+        is ntops.torch.mla_rope_kv_cache_write
+    )
+
+
+@skip_if_cuda_not_available
+def test_mla_rope_kv_cache_write_output_anchored_fallback(monkeypatch):
+    module = importlib.import_module("ntops.torch.mla_rope_kv_cache_write")
+    monkeypatch.setattr(
+        module, "_requires_output_anchored_cache_write", lambda: True
+    )
+
+    tokens, latent, rope = 3, 8, 8
+    kv_c = torch.randn(tokens, latent, device="cuda", dtype=torch.float16)
+    k_pe = torch.randn(tokens, rope, device="cuda", dtype=torch.float16)
+    cache = torch.randn(4, 4, latent + rope, device="cuda", dtype=torch.float16)
+    reference_cache = cache.clone()
+    slots = torch.tensor((0, -1, 5), device="cuda", dtype=torch.int64)
+    positions = torch.tensor((0, 1, 2), device="cuda", dtype=torch.int64)
+    table = _tables(8, rope, torch.float32, "cuda")
+
+    result = module.mla_rope_kv_cache_write(
+        kv_c,
+        k_pe,
+        cache,
+        slots,
+        positions,
+        table,
+        block_size=8,
+        num_warps=1,
+        num_stages=1,
+    )
+    module.mla_rope_kv_cache_write_reference(
+        kv_c,
+        k_pe,
+        reference_cache,
+        slots,
+        positions,
+        table,
+    )
+
+    assert result is None
+    assert torch.allclose(cache, reference_cache, rtol=2e-3, atol=2e-3)
