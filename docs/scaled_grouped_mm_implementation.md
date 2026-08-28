@@ -138,26 +138,28 @@ HIP:
   acc += sum(A_odd[:, :, None] * B_odd[None, :, :], axis=1)
 ```
 
-The public operator selects one of two single-kernel decoders without changing
-its mathematical interface. CoreX retains the faster arithmetic E2M1 decoder.
-HIP uses two read-only 256-entry tables that map each packed byte directly to its
-low- and high-nibble values. Table values are exact in FP32, and the E8M0 scale
-is still applied inside the kernel before conversion to BF16. Neither path
-materializes the full dequantized `[G, K, N]` weight.
+The public operator selects one of two single-kernel schedules without changing
+its mathematical interface. CoreX retains the faster block-dot schedule. HIP
+uses a branchless integer E2M1 decoder followed by explicit FP32 reductions.
+Neither path materializes the full dequantized `[G, K, N]` weight.
 
-The table form is required for DCU compiler stability. The SSA emitter expands
-elementwise values inside a block-dot operand. The arithmetic decoder therefore
-duplicated every packed load, boundary mask, `where`, and `exp2` expression and
-created a very large Triton AST. A first lookup revision reduced that expression
-substantially, but its LLIR still contained two
-`llvm.amdgcn.mmac.f32.16x16x16bf16` calls. AMD `make_amdgcn` continued to
-segfault even after reducing the tile to `16x16` and the launch to one wave.
+The separate HIP schedule is required for DCU compiler stability. The SSA
+emitter expands elementwise values inside a block-dot operand, producing a large
+Triton AST whose LLIR contains two
+`llvm.amdgcn.mmac.f32.16x16x16bf16` calls. AMD `make_amdgcn` segfaulted even after
+reducing the tile to `16x16` and the launch to one wave.
 
-The current HIP path therefore avoids `dot` entirely. Its generated executable
-Triton source is about 31 KB and contains one packed load, one gather from each
-decode table, no decode `tl.where`, no `tl.dot`, and two FP32 reductions. The
-weights are rounded to BF16 before conversion to FP32, preserving the reference
-dequantization semantics without materializing the full `[G, K, N]` tensor.
+An intermediate table-lookup decoder compiled without MMAC, but was not
+numerically valid: a tensor-valued `.source[...]` index was typed as a scalar by
+the SSA frontend, so the reduction coordinate never reached the packed-weight
+load. A direct arithmetic revision exposed the same coordinate-loss behavior in
+`where` predicates. The current decoder therefore uses only integer bitwise and
+arithmetic operations. It constructs twice the E2M1 magnitude exactly, applies
+the sign as `1 - 2 * sign_bit`, converts once to FP32, and multiplies by `0.5`.
+
+The resulting HIP IR contains no gather, `where`, `dot`, or MMAC operation and
+uses two explicit FP32 reductions. Weights are rounded to BF16 before conversion
+back to FP32 for accumulation, preserving the reference dequantization semantics.
 
 ### 4.2 Arrangement
 
@@ -175,20 +177,19 @@ HIP:   BLOCK_M=1,  BLOCK_N=16, num_warps=1, num_stages=1
 ```
 
 The CoreX arithmetic configuration was selected from a bounded
-fixed-configuration comparison. HIP combines the lookup decoder with a single
-output row and a small N tile to keep the explicit reduction bounded. Autotuning
-is intentionally not part of this revision: a candidate
+fixed-configuration comparison. HIP combines the branchless decoder with a
+single output row and a small N tile to keep the explicit reduction bounded.
+Autotuning is intentionally not part of this revision: a candidate
 that crashes an AMD compiler process cannot be caught by the Python autotuner.
 Platform-specific tuning should be added only after both backends have a known
 correct fixed configuration.
 
-The HIP lookup descriptors additionally mark dense G/K/N dimensions as
-compile-time specializations and declare both packed-byte decode tables with
-their exact length of 256. Triton compiles and caches a specialization for each
-encountered shape, allowing repeated shape predicates to fold before AMD LLVM
-code generation. Routed M dimensions deliberately remain runtime values. Making
-the per-expert row count constexpr specializes it to the maximum sequence length,
-which lets padding programs for shorter experts overwrite later expert rows.
+The HIP descriptors additionally mark dense G/K/N dimensions as compile-time
+specializations. Triton compiles and caches a specialization for each encountered
+shape, allowing repeated shape predicates to fold before AMD LLVM code generation.
+Routed M dimensions deliberately remain runtime values. Making the per-expert row
+count constexpr specializes it to the maximum sequence length, which lets padding
+programs for shorter experts overwrite later expert rows.
 
 The HIP tile uses one 64-thread wave and does not emit dot-operand layout
 conversions or `llvm.amdgcn.mmac` calls. CoreX retains its independently measured
@@ -207,9 +208,9 @@ On Iluvatar, the MoE-shaped screening case `G=8, M=16, K=4096, N=4096` produced:
 These arithmetic-decoder numbers are retained as the tile-selection record. A
 fresh run of the current dispatched CoreX path on the same shape measured
 `1.4627 ms` mean (`warmup=25`, `rep=100`). An experimental unconditional
-lookup path with `BLOCK_N=64` measured `4.2387 ms`, so the DCU compiler workaround
-is intentionally not applied to CoreX. HIP uses `1x16` until its compile/run
-stability and performance have been measured on the target device.
+table-lookup path with `BLOCK_N=64` measured `4.2387 ms`, so the DCU compiler
+workaround is intentionally not applied to CoreX. HIP uses `1x16` until its
+compile/run stability and performance have been measured on the target device.
 
 ### 4.3 Removed private compiler dependency
 
@@ -223,16 +224,14 @@ ninetoothed.backends.emitters.ssa._emit_linalg_dot
 That failed on the installed stable legacy compiler because
 `ninetoothed.backends` did not exist, and tied the operator to one internal SSA
 revision. Both dispatched implementations use normal DSL operations already
-used elsewhere in ntops: bitwise arithmetic or source indexing, `where`, `exp2`,
-`zeros`, dtype conversion, `dot` on CoreX, and `sum` on HIP.
+used elsewhere in ntops: bitwise arithmetic, `exp2`, `zeros`, dtype conversion,
+`dot` on CoreX, and `sum` on HIP.
 
-Two frontend-compatibility details are also intentional:
+One frontend-compatibility detail is also intentional:
 
 - casts use method-style `.to(ntl.dtype)`: the DCU SSA emitter lowers this to
   `.to(tl.dtype)`, while `ntl.cast(value, ntl.dtype)` can leak an undefined
-  runtime `ntl.dtype` value into generated Triton;
-- the device lookup tables are passed as ordinary one-dimensional tensors and
-  accessed through `.source[...]`, a form accepted by both frontend paths.
+  runtime `ntl.dtype` value into generated Triton.
 
 ## 5. PyTorch alignment and limits
 
@@ -267,16 +266,15 @@ Coverage includes:
 - uniform `G=2, M=17, K=96, N=19`, exercising M/N tails;
 - routed rows `(4, 0, 7)`, exercising a zero-token expert;
 - all 16 E2M1 codes in both nibble positions using an identity activation;
-- all 256 packed bytes in the low/high lookup table construction;
 - three independent K scale blocks;
 - raw byte storage and native packed dtypes when the installed PyTorch has them;
 - dtype, shape, recipe, option, and offset failures;
 - equivalent one-element list/default API forms and an all-zero-token return;
 - generated CoreX Python source containing exactly two ordinary dots and no
   `dot_scaled`;
-- generated HIP lookup source containing no dot/MMAC input, exactly two FP32
-  reductions, no arithmetic-decoder `tl.where`, and no unresolved `ntl.`
-  namespace.
+- generated HIP reduction source containing no dot/MMAC input, exactly two FP32
+  reductions, no `tl.where`, no decode-table arguments, and no unresolved
+  `ntl.` namespace.
 
 ### 6.2 Iluvatar result
 
@@ -296,7 +294,7 @@ Command:
 PYTHONPATH=src pytest -q tests/test_scaled_grouped_mm.py
 ```
 
-Expected result for this environment is `16 passed, 2 skipped`. The skipped
+Expected result for this environment is `15 passed, 2 skipped`. The skipped
 cases are only the native `float4_e2m1fn_x2`/`float8_e8m0fnu` dtype variants,
 because PyTorch 2.7.1 does not define the former. The raw-byte uniform, routed,
 and exhaustive encoding tests all launch the accelerator kernel.

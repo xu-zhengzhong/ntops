@@ -128,27 +128,9 @@ def test_scaled_grouped_mm_decodes_every_e2m1_code_and_nibble_position():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-def test_scaled_grouped_mm_packed_lookup_covers_every_byte():
-    from ntops.torch.scaled_grouped_mm import (
-        _PACKED_E2M1_EVEN,
-        _PACKED_E2M1_ODD,
-    )
-
-    nibble_values = _decode_mxfp4(
-        torch.arange(16, dtype=torch.uint8).repeat(2).reshape(1, 32, 1),
-        torch.full((1, 1, 1), 127, dtype=torch.uint8),
-    ).reshape(32)[:16].float()
-    packed = torch.arange(256, dtype=torch.int64)
-    even = torch.tensor(_PACKED_E2M1_EVEN)
-    odd = torch.tensor(_PACKED_E2M1_ODD)
-
-    torch.testing.assert_close(even, nibble_values[packed & 0xF], rtol=0, atol=0)
-    torch.testing.assert_close(odd, nibble_values[packed >> 4], rtol=0, atol=0)
-
-
-def _generated_kernel_source(lookup=False):
+def _generated_kernel_source(reduction=False):
     kernel = ninetoothed.make(
-        *ntops.kernels.scaled_grouped_mm.premake(False, lookup=lookup),
+        *ntops.kernels.scaled_grouped_mm.premake(False, reduction=reduction),
         max_num_configs=1,
     )
 
@@ -174,16 +156,19 @@ def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
     assert "ntl." not in source
 
 
-def test_scaled_grouped_mm_lookup_lowers_without_mmac_or_decode_tree():
-    source = _generated_kernel_source(lookup=True)
+def test_scaled_grouped_mm_hip_reduction_lowers_without_mmac_or_branches():
+    source = _generated_kernel_source(reduction=True)
 
     dot_count = source.count("tl.dot(") + source.count("triton.language.dot(")
     sum_count = source.count("tl.sum(") + source.count("triton.language.sum(")
+    reduction_loop_count = source.count("_body_i in range(0, 16, 1):")
     assert dot_count == 0
-    assert sum_count == 2
+    assert sum_count == 2 or reduction_loop_count == 2
     assert "dot_scaled" not in source
     assert "ntl." not in source
     assert "tl.where(" not in source
+    assert "decode_even" not in source
+    assert "decode_odd" not in source
 
 
 def _cpu_inputs(group_count=3, total_m=None):

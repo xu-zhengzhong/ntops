@@ -1,5 +1,4 @@
 import enum
-import functools
 
 import torch
 import torch.nn.functional as F
@@ -24,28 +23,6 @@ class _SwizzleType(enum.IntEnum):
 
 ScalingType = getattr(F, "ScalingType", _ScalingType)
 SwizzleType = getattr(F, "SwizzleType", _SwizzleType)
-
-_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-
-
-def _decode_e2m1(code):
-    magnitude = _E2M1_VALUES[code & 0x7]
-    return -magnitude if code & 0x8 else magnitude
-
-
-_PACKED_E2M1_EVEN = tuple(_decode_e2m1(byte & 0xF) for byte in range(256))
-_PACKED_E2M1_ODD = tuple(_decode_e2m1(byte >> 4) for byte in range(256))
-
-
-@functools.lru_cache(maxsize=None)
-def _packed_e2m1_tables(device_string):
-    device = torch.device(device_string)
-    table = torch.tensor(
-        (_PACKED_E2M1_EVEN, _PACKED_E2M1_ODD),
-        dtype=torch.float32,
-        device=device,
-    )
-    return table[0], table[1]
 
 
 def _dtype_if_available(name):
@@ -259,18 +236,17 @@ def scaled_grouped_mm(
     if output.numel() == 0:
         return output
 
-    # The SSA arithmetic decoder expands into a large block-dot expression on
-    # AMD, and gfx936 codegen crashes on its BF16 MMAC lowering. Use a compact
-    # lookup decoder and an ordinary FP32 reduction on HIP.
-    use_lookup = torch.version.hip is not None
-    block_size_n = 16 if use_lookup else 64
-    num_warps = 1 if use_lookup else 4
+    # The block-dot decoder lowers to BF16 MMAC on AMD and crashes gfx936
+    # codegen. Use a branchless decoder with an ordinary FP32 reduction on HIP.
+    use_reduction = torch.version.hip is not None
+    block_size_n = 16 if use_reduction else 64
+    num_warps = 1 if use_reduction else 4
     kernel = _cached_make(
         ntops.kernels.scaled_grouped_mm.premake,
         jagged,
-        block_size_m=1 if use_lookup else 16,
+        block_size_m=1 if use_reduction else 16,
         block_size_n=block_size_n,
-        lookup=use_lookup,
+        reduction=use_reduction,
         num_warps=num_warps,
         num_stages=1,
         max_num_configs=1,
@@ -281,9 +257,6 @@ def scaled_grouped_mm(
     mat_a_odd = mat_a[..., 1:]
 
     common_args = (mat_a_even, mat_a_odd, mat_b_uint8, scale_b_uint8)
-    if use_lookup:
-        decode_even, decode_odd = _packed_e2m1_tables(str(mat_a.device))
-        common_args += (decode_even, decode_odd)
 
     if not jagged:
         kernel(*common_args, output)

@@ -66,34 +66,6 @@ def arrangement(
     )
 
 
-def arrangement_lookup(
-    mat_a_even,
-    mat_a_odd,
-    mat_b,
-    scale_b,
-    decode_even,
-    decode_odd,
-    output,
-    block_size_m=None,
-    block_size_n=None,
-):
-    arranged = arrangement(
-        mat_a_even,
-        mat_a_odd,
-        mat_b,
-        scale_b,
-        output,
-        block_size_m=block_size_m,
-        block_size_n=block_size_n,
-    )
-    return (
-        *arranged[:-1],
-        decode_even.tile((1,)),
-        decode_odd.tile((1,)),
-        arranged[-1],
-    )
-
-
 def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
 
@@ -133,23 +105,36 @@ def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     output = accumulator
 
 
-def application_lookup(
-    mat_a_even,
-    mat_a_odd,
-    mat_b,
-    scale_b,
-    decode_even,
-    decode_odd,
-    output,
-):
+def application_reduction(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
 
     for k in range(mat_a_even.shape[0]):
         packed = (mat_b[k] + 0).to(ntl.int32)
         scale = ntl.exp2((scale_b[k] + 0).to(ntl.float32) - 127.0)
 
-        weight_even = (decode_even.source[packed] * scale).to(ntl.bfloat16)
-        weight_odd = (decode_odd.source[packed] * scale).to(ntl.bfloat16)
+        even_code = packed & 0xF
+        even_bit_0 = even_code & 1
+        even_bit_1 = (even_code >> 1) & 1
+        even_bit_2 = (even_code >> 2) & 1
+        even_low_magnitude = even_bit_0 + (even_bit_1 << 1)
+        even_twice_magnitude = even_low_magnitude + even_bit_2 * (
+            4 + even_bit_0 + (even_bit_1 << 1) + ((even_bit_0 * even_bit_1) << 1)
+        )
+        even_sign = 1 - (((even_code >> 3) & 1) << 1)
+        decoded_even = ((even_sign * even_twice_magnitude) + 0).to(ntl.float32) * 0.5
+        weight_even = (decoded_even * scale).to(ntl.bfloat16)
+
+        odd_code = (packed >> 4) & 0xF
+        odd_bit_0 = odd_code & 1
+        odd_bit_1 = (odd_code >> 1) & 1
+        odd_bit_2 = (odd_code >> 2) & 1
+        odd_low_magnitude = odd_bit_0 + (odd_bit_1 << 1)
+        odd_twice_magnitude = odd_low_magnitude + odd_bit_2 * (
+            4 + odd_bit_0 + (odd_bit_1 << 1) + ((odd_bit_0 * odd_bit_1) << 1)
+        )
+        odd_sign = 1 - (((odd_code >> 3) & 1) << 1)
+        decoded_odd = ((odd_sign * odd_twice_magnitude) + 0).to(ntl.float32) * 0.5
+        weight_odd = (decoded_odd * scale).to(ntl.bfloat16)
         activation_even = (mat_a_even[k] + 0).to(ntl.float32)
         activation_odd = (mat_a_odd[k] + 0).to(ntl.float32)
         weight_even = (weight_even + 0).to(ntl.float32)
@@ -165,19 +150,19 @@ def application_lookup(
     output = accumulator
 
 
-def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
+def premake(jagged=False, block_size_m=None, block_size_n=None, reduction=False):
     arrangement_ = functools.partial(
-        arrangement_lookup if lookup else arrangement,
+        arrangement,
         block_size_m=block_size_m,
         block_size_n=block_size_n,
     )
     jagged_dim = 1 if jagged else None
-    # HIP uses the lookup path only. Specializing its matrix dimensions lets
+    # HIP uses the reduction path only. Specializing its matrix dimensions lets
     # Triton fold the repeated shape predicates before AMD LLVM codegen.
-    dense_shape_options = {"constexpr": True} if lookup else None
+    dense_shape_options = {"constexpr": True} if reduction else None
     activation_shape_options = (
         ({"constexpr": True}, None, {"constexpr": True})
-        if lookup and jagged
+        if reduction and jagged
         else dense_shape_options
     )
     common_tensors = (
@@ -198,10 +183,6 @@ def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
         Tensor(3, dtype=torch.uint8, other=0, shape_options=dense_shape_options),
         Tensor(3, dtype=torch.uint8, other=127, shape_options=dense_shape_options),
     )
-    lookup_tensors = (
-        Tensor(shape=(256,), dtype=torch.float32, other=0),
-        Tensor(shape=(256,), dtype=torch.float32, other=0),
-    )
     output_tensor = (
         Tensor(
             3,
@@ -210,6 +191,6 @@ def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
             shape_options=activation_shape_options,
         ),
     )
-    tensors = common_tensors + (lookup_tensors if lookup else ()) + output_tensor
+    tensors = common_tensors + output_tensor
 
-    return arrangement_, application_lookup if lookup else application, tensors
+    return arrangement_, application_reduction if reduction else application, tensors
