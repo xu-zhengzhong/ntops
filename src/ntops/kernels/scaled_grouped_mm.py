@@ -166,18 +166,38 @@ def premake(jagged=False, block_size_m=None, block_size_n=None, lookup=False):
         block_size_n=block_size_n,
     )
     jagged_dim = 1 if jagged else None
+    # HIP uses the lookup path only. Specializing its matrix dimensions lets
+    # Triton fold the repeated shape predicates before AMD LLVM codegen.
+    shape_options = {"constexpr": True} if lookup else None
     common_tensors = (
-        Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim, other=0),
-        Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim, other=0),
-        Tensor(3, dtype=torch.uint8, other=0),
-        Tensor(3, dtype=torch.uint8, other=127),
+        Tensor(
+            3,
+            dtype=torch.bfloat16,
+            jagged_dim=jagged_dim,
+            other=0,
+            shape_options=shape_options,
+        ),
+        Tensor(
+            3,
+            dtype=torch.bfloat16,
+            jagged_dim=jagged_dim,
+            other=0,
+            shape_options=shape_options,
+        ),
+        Tensor(3, dtype=torch.uint8, other=0, shape_options=shape_options),
+        Tensor(3, dtype=torch.uint8, other=127, shape_options=shape_options),
     )
     lookup_tensors = (
-        Tensor(1, dtype=torch.float32, other=0),
-        Tensor(1, dtype=torch.float32, other=0),
+        Tensor(shape=(256,), dtype=torch.float32, other=0),
+        Tensor(shape=(256,), dtype=torch.float32, other=0),
     )
     output_tensor = (
-        Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim),
+        Tensor(
+            3,
+            dtype=torch.bfloat16,
+            jagged_dim=jagged_dim,
+            shape_options=shape_options,
+        ),
     )
     tensors = common_tensors + (lookup_tensors if lookup else ()) + output_tensor
 

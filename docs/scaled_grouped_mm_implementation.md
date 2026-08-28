@@ -172,6 +172,18 @@ that crashes an AMD compiler process cannot be caught by the Python autotuner.
 Platform-specific tuning should be added only after both backends have a known
 correct fixed configuration.
 
+The HIP lookup descriptors additionally mark tensor dimensions as compile-time
+specializations and declare both packed-byte decode tables with their exact
+length of 256. This does not constrain the public input sizes: Triton compiles
+and caches a specialization for each encountered shape. It does allow constant
+folding of the repeated shape predicates emitted by the SSA arrangement before
+AMD LLVM code generation. On the local Triton backend, for the tail-shape test
+`G=2, M=17, K=96, N=19`, this reduced TTIR from 77,653 to 47,630 bytes, TTGIR
+from 82,865 to 52,502 bytes, LLIR from 36,480 to 31,082 bytes, and the generated
+device binary from 15,312 to 8,616 bytes. These figures measure compiler IR
+complexity rather than DCU runtime performance; the DCU compile/run result must
+still be verified on the target machine.
+
 On Iluvatar, the MoE-shaped screening case `G=8, M=16, K=4096, N=4096` produced:
 
 | `BLOCK_M` | `BLOCK_N` | warps | mean latency |
