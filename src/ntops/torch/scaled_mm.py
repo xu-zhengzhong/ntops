@@ -262,6 +262,7 @@ def scaled_mm(
     ) = grouped
 
     use_hip = torch.version.hip is not None
+    block_size_k = 32 if use_hip else 16
     kernel = _cached_make(
         ntops.kernels.scaled_mm.premake,
         mat_a.dtype,
@@ -269,7 +270,7 @@ def scaled_mm(
         bias.dtype if bias is not None else None,
         block_size_m=16,
         block_size_n=16,
-        block_size_k=32,
+        block_size_k=block_size_k,
         num_warps=1 if use_hip else 4,
         num_stages=1,
         max_num_configs=1,

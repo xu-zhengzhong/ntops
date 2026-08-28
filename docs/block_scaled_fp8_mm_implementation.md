@@ -73,26 +73,30 @@ column-major scale，不在 wrapper 中强制复制。
 ### 3.1 只使用公共 lowering 子集
 
 实现不调用 tl.dot_scaled，不 patch NineToothed 私有 SSA/emitter，也不调用平台
-专用 intrinsic。kernel 只使用普通 masked load/store、float8_e4m3fn 普通
-ntl.dot，以及 FP32 cast、乘法和累加。
+专用 intrinsic。HIP kernel 使用 float8_e4m3fn 普通 ntl.dot；CoreX kernel
+先把加载的 E4M3FN tile 精确转换为 BF16，再使用普通 BF16 ntl.dot。两条路径
+都只使用普通 masked load/store、cast、乘法和 FP32 累加。
 
-cast 使用已经在海光 legacy/SSA 路径验证的 method-style .to(ntl.float32)。
+cast 使用 method-style .to(ntl.bfloat16) / .to(ntl.float32)。
 generated source 测试会检查不存在未解析的 ntl. 和 dot_scaled。
 
-### 3.2 32-wide dot 与 128-wide scale
+### 3.2 分平台 dot 与 128-wide scale
 
 海光 gfx936 上，16x128x128 以及 K tile 128 的 FP8 dot 会在 AMD LLVM codegen
 阶段触发进程级崩溃。固定实现因此使用：
 
-    BLOCK_M=16, BLOCK_N=16, BLOCK_K=32
+    BLOCK_M=16, BLOCK_N=16
     scale K block=128
     num_stages=1
-    HIP num_warps=1
-    CoreX num_warps=4
+    HIP BLOCK_K=32, num_warps=1
+    CoreX BLOCK_K=16, num_warps=4
 
-每四个 32-wide dot 使用同一个 128-K scale。该 tile 已在 gfx936 上覆盖 M=1、
-M 尾块、多 K block 和多个 N block。未把进程级失败的候选加入 autotuner，避免
-一次新 shape 请求终止服务进程。
+HIP 每四个 32-wide FP8 dot、CoreX 每八个 16-wide BF16 dot 使用同一个
+128-K scale。E4M3FN 的所有有限值都能由 BF16 精确表示，因此 CoreX 转换不改变
+输入值。MR-V100/Triton 3.1.0 的 32-wide FP8 dot 只累计前 16 个 K lane，
+16-wide FP8 dot 则破坏 M/N tile lane 布局，因此原生 FP8 dot 不能作为该平台的
+正确性路径。上述 tile 已覆盖 M=1、M 尾块、多 K block 和多个 N block。未把进程
+级失败的候选加入 autotuner，避免一次新 shape 请求终止服务进程。
 
 ### 3.3 无分配 view 映射
 
@@ -112,7 +116,10 @@ scale，也不复制 column-major weight，适合 decode、prefill 和专家 pro
 
     PYTHONPATH=src pytest -q tests/test_scaled_mm.py
 
-海光 BW/gfx936、PyTorch 2.9.0、HIP 6.3.26093 的结果为 14 passed。
+CoreX MR-V100、PyTorch 2.7.1、Triton 3.1.0 的结果为 15 passed。
+海光 BW/gfx936、PyTorch 2.9.0、HIP 6.3.26093 的既有结果为 14 passed；该结果
+记录于新增完整 K/N lane 回归测试之前，本次未在海光设备复验，但保留的 HIP
+K=32 FP8 路径未修改。
 
 覆盖内容：
 
@@ -123,7 +130,7 @@ scale，也不复制 column-major weight，适合 decode、prefill 和专家 pro
 - bias 融合、BF16 与 FP32 output；
 - PyTorch 单值/list API 形式；
 - dtype、shape、layout、recipe、swizzle 和 fast-accum 拒绝路径；
-- generated source 中只有普通 FP8 dot，无 dot_scaled 和 ntl. 泄漏。
+- generated source 中只有普通 FP8/BF16 dot，无 dot_scaled 和 ntl. 泄漏。
 
 PyTorch reference 独立地把 FP8 转为 FP32，按 1x128/128x128 scale block
 反量化后执行 FP32 matmul，并在最后转换到目标 dtype。

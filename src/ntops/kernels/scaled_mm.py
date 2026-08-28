@@ -99,14 +99,13 @@ def arrangement_with_bias(
     return (*arranged[:-1], bias_arranged, output_arranged)
 
 
-def _scaled_dot(mat_a, mat_b, scale_a, scale_b, output):
+def _scaled_dot(mat_a, mat_b, scale_a, scale_b, output, dots_per_scale):
     accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
 
     for scale_index in range(scale_a.shape[0]):
         block_accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
-        # A 128-element scale group contains four portable 32-wide FP8 dots.
-        for k_offset in range(4):
-            k = scale_index * 4 + k_offset
+        for k_offset in range(dots_per_scale):
+            k = scale_index * dots_per_scale + k_offset
             block_accumulator += ntl.dot(mat_a[k], mat_b[k])
         scale = (scale_a[scale_index] + 0).to(ntl.float32) * (
             scale_b[scale_index] + 0
@@ -116,12 +115,41 @@ def _scaled_dot(mat_a, mat_b, scale_a, scale_b, output):
     return accumulator
 
 
-def application(mat_a, mat_b, scale_a, scale_b, output):
-    output = _scaled_dot(mat_a, mat_b, scale_a, scale_b, output)  # noqa: F841
+def _scaled_dot_bf16(mat_a, mat_b, scale_a, scale_b, output, dots_per_scale):
+    accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
+
+    for scale_index in range(scale_a.shape[0]):
+        block_accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
+        for k_offset in range(dots_per_scale):
+            k = scale_index * dots_per_scale + k_offset
+            activation = mat_a[k].to(ntl.bfloat16)
+            weight = mat_b[k].to(ntl.bfloat16)
+            block_accumulator += ntl.dot(activation, weight)
+        scale = (scale_a[scale_index] + 0).to(ntl.float32) * (
+            scale_b[scale_index] + 0
+        ).to(ntl.float32)
+        accumulator += block_accumulator * scale
+
+    return accumulator
 
 
-def application_with_bias(mat_a, mat_b, scale_a, scale_b, bias, output):
-    accumulator = _scaled_dot(mat_a, mat_b, scale_a, scale_b, output)
+def application_k16(mat_a, mat_b, scale_a, scale_b, output):
+    output = _scaled_dot_bf16(  # noqa: F841
+        mat_a, mat_b, scale_a, scale_b, output, 8
+    )
+
+
+def application_k32(mat_a, mat_b, scale_a, scale_b, output):
+    output = _scaled_dot(mat_a, mat_b, scale_a, scale_b, output, 4)  # noqa: F841
+
+
+def application_with_bias_k16(mat_a, mat_b, scale_a, scale_b, bias, output):
+    accumulator = _scaled_dot_bf16(mat_a, mat_b, scale_a, scale_b, output, 8)
+    output = accumulator + (bias + 0).to(ntl.float32)  # noqa: F841
+
+
+def application_with_bias_k32(mat_a, mat_b, scale_a, scale_b, bias, output):
+    accumulator = _scaled_dot(mat_a, mat_b, scale_a, scale_b, output, 4)
     output = accumulator + (bias + 0).to(ntl.float32)  # noqa: F841
 
 
@@ -133,8 +161,8 @@ def premake(
     block_size_n=BLOCK_SIZE_N,
     block_size_k=BLOCK_SIZE_K,
 ):
-    if block_size_k != BLOCK_SIZE_K:
-        raise ValueError("block_size_k must be 32 for 128-element scale groups")
+    if block_size_k not in (16, 32):
+        raise ValueError("block_size_k must be 16 or 32")
 
     has_bias = bias_dtype is not None
     arrangement_function = arrangement_with_bias if has_bias else arrangement
@@ -155,5 +183,11 @@ def premake(
         tensors += (Tensor(3, dtype=bias_dtype, other=0.0),)
 
     tensors += (Tensor(3, dtype=output_dtype),)
-    application_function = application_with_bias if has_bias else application
+    applications = {
+        (16, False): application_k16,
+        (16, True): application_with_bias_k16,
+        (32, False): application_k32,
+        (32, True): application_with_bias_k32,
+    }
+    application_function = applications[(block_size_k, has_bias)]
     return arrangement_, application_function, tensors

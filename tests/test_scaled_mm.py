@@ -127,6 +127,33 @@ def test_scaled_mm_attention_decode_with_bias_and_fp32_output():
     torch.testing.assert_close(output, expected, rtol=0.01, atol=0.1)
 
 
+@skip_if_cuda_is_unavailable
+def test_scaled_mm_covers_the_full_128_element_scale_block():
+    recipe_a = ntops.torch.ScalingType.BlockWise1x128
+    recipe_b = ntops.torch.ScalingType.BlockWise128x128
+    mat_a = torch.zeros((1, 4, 32), device="cuda")
+    mat_a[:, :, 16:] = 1
+    mat_a = mat_a.reshape(1, 128).to(torch.float8_e4m3fn)
+    column_values = torch.arange(128, device="cuda") % 7 - 3
+    weight = column_values[:, None].expand(-1, 128)
+    mat_b = weight.to(torch.float8_e4m3fn).t()
+    scale_a = torch.ones((1, 1), device="cuda")
+    scale_b = torch.ones((1, 1), device="cuda")
+
+    output = ntops.torch.scaled_mm(
+        mat_a,
+        mat_b,
+        scale_a,
+        recipe_a,
+        scale_b,
+        recipe_b,
+        output_dtype=torch.float32,
+    )
+
+    expected = (column_values * 64).to(torch.float32).unsqueeze(0)
+    torch.testing.assert_close(output, expected)
+
+
 def _cpu_inputs(m=2, n=128, k=128):
     mat_a = torch.empty((m, k), dtype=torch.float8_e4m3fn)
     mat_b = torch.empty((n, k), dtype=torch.float8_e4m3fn).t()
