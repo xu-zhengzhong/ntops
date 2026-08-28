@@ -1,6 +1,4 @@
-import contextlib
 import enum
-import threading
 
 import torch
 import torch.nn.functional as F
@@ -54,87 +52,21 @@ def _require_contiguous(name, value):
         raise ValueError(f"{name} must be contiguous")
 
 
+def _unwrap_single_level(name, value):
+    if not isinstance(value, (tuple, list)):
+        return value
+
+    if len(value) != 1:
+        raise NotImplementedError(f"{name} must contain exactly one level")
+
+    return value[0]
+
+
 def _as_uint8(value):
     if value.dtype == torch.uint8:
         return value
 
     return value.view(torch.uint8)
-
-
-_LOWERING_LOCK = threading.RLock()
-
-
-@contextlib.contextmanager
-def _enable_dot_scaled_lowering():
-    from ninetoothed.backends.emitters import ssa as ssa_emitter
-    from ninetoothed.frontend import python as python_frontend
-
-    def lower_linalg_call(self, name, node, operands, operations):
-        if name != "dot_scaled":
-            return original_lower(self, name, node, operands, operations)
-
-        if len(operands) != 10:
-            raise python_frontend.LoweringError(
-                "ntops dot_scaled expects the full Triton argument list"
-            )
-
-        return self._emit(
-            operations,
-            "linalg.dot",
-            operands=(
-                operands[0].name,
-                operands[3].name,
-                operands[4].name,
-                operands[6].name,
-            ),
-            attrs={"ntops_dot_scaled": True},
-            result_type=operands[6].type,
-        )
-
-    def emit_linalg_dot(operation, context, coords=None):
-        if not operation.attrs.get("ntops_dot_scaled"):
-            return original_emit(operation, context, coords=coords)
-
-        if not (context.block_program or context.native_block_program):
-            raise RuntimeError("dot_scaled requires a block-program lowering")
-
-        lhs, rhs, rhs_scale, accumulator = operation.operands
-        lhs_axes = ssa_emitter._value_axes(lhs, context)
-        rhs_axes = ssa_emitter._value_axes(rhs, context)
-        scale_axes = ssa_emitter._value_axes(rhs_scale, context)
-        lhs_value = ssa_emitter._emit_element(
-            lhs, context.target.block_coords(lhs_axes), context
-        )
-        rhs_value = ssa_emitter._emit_element(
-            rhs, context.target.block_coords(rhs_axes), context
-        )
-        scale_value = ssa_emitter._emit_element(
-            rhs_scale, context.target.block_coords(scale_axes), context
-        )
-        accumulator_value = ssa_emitter._emit_value(accumulator, context)
-
-        return (
-            f'tl.dot_scaled({lhs_value}, None, "bf16", {rhs_value}, '
-            f'{scale_value}, "e2m1", acc={accumulator_value}, '
-            "fast_math=True, rhs_k_pack=True)"
-        )
-
-    with _LOWERING_LOCK:
-        original_lower = (
-            python_frontend._ApplicationSSABuilder._lower_linalg_call
-        )
-        original_emit = ssa_emitter._emit_linalg_dot
-        python_frontend._ApplicationSSABuilder._lower_linalg_call = (
-            lower_linalg_call
-        )
-        ssa_emitter._emit_linalg_dot = emit_linalg_dot
-        try:
-            yield
-        finally:
-            python_frontend._ApplicationSSABuilder._lower_linalg_call = (
-                original_lower
-            )
-            ssa_emitter._emit_linalg_dot = original_emit
 
 
 def _validate_optional_arguments(
@@ -154,22 +86,26 @@ def _validate_optional_arguments(
     if scale_recipe_a is not None:
         raise NotImplementedError("scale_recipe_a is not supported for W4A16")
 
-    if isinstance(scale_recipe_b, (tuple, list)):
-        raise NotImplementedError("multi-level scale recipes are not supported")
-
     if not _enum_matches(scale_recipe_b, ScalingType, "BlockWise1x32"):
         raise ValueError("scale_recipe_b must be ScalingType.BlockWise1x32")
 
-    if swizzle_a is not None or swizzle_b is not None:
+    if swizzle_a is not None and not _enum_matches(
+        swizzle_a, SwizzleType, "NO_SWIZZLE"
+    ):
+        raise NotImplementedError("swizzle_a is not supported")
+
+    if swizzle_b is not None and not _enum_matches(
+        swizzle_b, SwizzleType, "NO_SWIZZLE"
+    ):
         raise NotImplementedError("swizzled inputs are not supported")
 
     if bias is not None:
         raise NotImplementedError("bias is not supported")
 
-    if output_dtype != torch.bfloat16:
+    if output_dtype not in (None, torch.bfloat16):
         raise ValueError("output_dtype must be torch.bfloat16")
 
-    if contraction_dim not in (None, ()):
+    if contraction_dim not in (None, (), []):
         raise NotImplementedError("contraction_dim is not supported")
 
     if use_fast_accum:
@@ -186,18 +122,11 @@ def _validate_inputs(mat_a, mat_b, scale_b, offs):
 
     packed_dtype = _dtype_if_available("float4_e2m1fn_x2")
     if mat_b.dtype != torch.uint8 and not _is_dtype(mat_b.dtype, packed_dtype):
-        raise TypeError(
-            "mat_b must have dtype torch.uint8 or torch.float4_e2m1fn_x2"
-        )
+        raise TypeError("mat_b must have dtype torch.uint8 or torch.float4_e2m1fn_x2")
 
     scale_dtype = _dtype_if_available("float8_e8m0fnu")
-    if (
-        scale_b.dtype != torch.uint8
-        and not _is_dtype(scale_b.dtype, scale_dtype)
-    ):
-        raise TypeError(
-            "scale_b must have dtype torch.uint8 or torch.float8_e8m0fnu"
-        )
+    if scale_b.dtype != torch.uint8 and not _is_dtype(scale_b.dtype, scale_dtype):
+        raise TypeError("scale_b must have dtype torch.uint8 or torch.float8_e8m0fnu")
 
     if mat_b.ndim != 3:
         raise ValueError("mat_b must have shape (G, K // 2, N)")
@@ -284,6 +213,11 @@ def scaled_grouped_mm(
     use_fast_accum=False,
 ):
     """Compute BF16 activations times block-scaled MXFP4 grouped weights."""
+    scale_b = _unwrap_single_level("scale_b", scale_b)
+    scale_recipe_b = _unwrap_single_level("scale_recipe_b", scale_recipe_b)
+    swizzle_a = _unwrap_single_level("swizzle_a", swizzle_a)
+    swizzle_b = _unwrap_single_level("swizzle_b", swizzle_b)
+
     _validate_optional_arguments(
         scale_a,
         scale_recipe_a,
@@ -295,26 +229,41 @@ def scaled_grouped_mm(
         contraction_dim,
         use_fast_accum,
     )
-    jagged, group_count, m, _, n = _validate_inputs(
-        mat_a, mat_b, scale_b, offs
-    )
+    jagged, group_count, m, _, n = _validate_inputs(mat_a, mat_b, scale_b, offs)
 
     output_shape = (group_count, m, n) if not jagged else (m, n)
-    output = torch.empty(
-        output_shape, dtype=torch.bfloat16, device=mat_a.device
+    output = torch.empty(output_shape, dtype=torch.bfloat16, device=mat_a.device)
+    if output.numel() == 0:
+        return output
+
+    kernel = _cached_make(
+        ntops.kernels.scaled_grouped_mm.premake,
+        jagged,
+        block_size_m=16,
+        block_size_n=64,
+        num_warps=4,
+        num_stages=1,
+        max_num_configs=1,
     )
-    with _enable_dot_scaled_lowering():
-        kernel = _cached_make(ntops.kernels.scaled_grouped_mm.premake, jagged)
     mat_b_uint8 = _as_uint8(mat_b)
     scale_b_uint8 = _as_uint8(scale_b)
+    mat_a_even = mat_a[..., :-1]
+    mat_a_odd = mat_a[..., 1:]
 
     if not jagged:
-        kernel(mat_a, mat_b_uint8, scale_b_uint8, output)
+        kernel(mat_a_even, mat_a_odd, mat_b_uint8, scale_b_uint8, output)
         return output
 
     offsets = torch.cat((offs.new_zeros(1), offs))
-    mat_a_jagged = torch.nested.nested_tensor_from_jagged(mat_a, offsets)
+    mat_a_even_jagged = torch.nested.nested_tensor_from_jagged(mat_a_even, offsets)
+    mat_a_odd_jagged = torch.nested.nested_tensor_from_jagged(mat_a_odd, offsets)
     output_jagged = torch.nested.nested_tensor_from_jagged(output, offsets)
-    kernel(mat_a_jagged, mat_b_uint8, scale_b_uint8, output_jagged)
+    kernel(
+        mat_a_even_jagged,
+        mat_a_odd_jagged,
+        mat_b_uint8,
+        scale_b_uint8,
+        output_jagged,
+    )
 
     return output

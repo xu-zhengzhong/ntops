@@ -1,20 +1,26 @@
+import pathlib
+
+import ninetoothed
 import pytest
 import torch
 
-import ninetoothed
 import ntops
 
-
-skip_if_dot_scaled_is_unavailable = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.version.hip is not None,
-    reason="Triton MXFP4 dot_scaled is unavailable",
+skip_if_cuda_is_unavailable = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA-compatible accelerator is unavailable",
+)
+native_dtypes = pytest.param(
+    True,
+    marks=pytest.mark.skipif(
+        not hasattr(torch, "float4_e2m1fn_x2") or not hasattr(torch, "float8_e8m0fnu"),
+        reason="native MXFP4 dtypes are unavailable",
+    ),
 )
 
 
 def _make_mxfp4_weight(group_count, k, n, device):
-    codes = torch.randint(
-        0, 16, (group_count, k, n), dtype=torch.uint8, device=device
-    )
+    codes = torch.randint(0, 16, (group_count, k, n), dtype=torch.uint8, device=device)
     packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
     scales = torch.randint(
         124,
@@ -31,9 +37,7 @@ def _decode_mxfp4(codes, scales):
     magnitude_code = codes & 0x7
     exponent = (magnitude_code >> 1).to(torch.int32)
     mantissa = (magnitude_code & 1).to(torch.float32)
-    normal = (1.0 + 0.5 * mantissa) * torch.exp2(
-        exponent.to(torch.float32) - 1.0
-    )
+    normal = (1.0 + 0.5 * mantissa) * torch.exp2(exponent.to(torch.float32) - 1.0)
     magnitude = torch.where(exponent == 0, 0.5 * mantissa, normal)
     sign = torch.where((codes & 0x8) == 0, 1.0, -1.0)
     block_scales = torch.exp2(scales.to(torch.float32) - 127.0)
@@ -54,20 +58,15 @@ def _scaled_grouped_mm(mat_a, mat_b, scale_b, offs=None):
     )
 
 
-@skip_if_dot_scaled_is_unavailable
-@pytest.mark.parametrize("native_dtypes", (False, True))
+@skip_if_cuda_is_unavailable
+@pytest.mark.parametrize("native_dtypes", (False, native_dtypes))
 def test_scaled_grouped_mm_uniform(native_dtypes):
     torch.manual_seed(0)
     group_count, m, k, n = 2, 17, 96, 19
     mat_a = (
-        0.25
-        * torch.randn(
-            (group_count, m, k), dtype=torch.bfloat16, device="cuda"
-        )
+        0.25 * torch.randn((group_count, m, k), dtype=torch.bfloat16, device="cuda")
     ).contiguous()
-    codes, mat_b, scale_b = _make_mxfp4_weight(
-        group_count, k, n, mat_a.device
-    )
+    codes, mat_b, scale_b = _make_mxfp4_weight(group_count, k, n, mat_a.device)
 
     if native_dtypes:
         mat_b = mat_b.view(torch.float4_e2m1fn_x2)
@@ -82,20 +81,17 @@ def test_scaled_grouped_mm_uniform(native_dtypes):
     torch.testing.assert_close(output, expected, rtol=0.03, atol=0.03)
 
 
-@skip_if_dot_scaled_is_unavailable
-@pytest.mark.parametrize("native_dtypes", (False, True))
+@skip_if_cuda_is_unavailable
+@pytest.mark.parametrize("native_dtypes", (False, native_dtypes))
 def test_scaled_grouped_mm_jagged_with_zero_token_expert(native_dtypes):
     torch.manual_seed(1)
     group_count, k, n = 3, 96, 23
     expert_rows = (4, 0, 7)
     total_m = sum(expert_rows)
     mat_a = (
-        0.25
-        * torch.randn((total_m, k), dtype=torch.bfloat16, device="cuda")
+        0.25 * torch.randn((total_m, k), dtype=torch.bfloat16, device="cuda")
     ).contiguous()
-    codes, mat_b, scale_b = _make_mxfp4_weight(
-        group_count, k, n, mat_a.device
-    )
+    codes, mat_b, scale_b = _make_mxfp4_weight(group_count, k, n, mat_a.device)
     offs = torch.tensor((4, 4, 11), dtype=torch.int32, device=mat_a.device)
 
     if native_dtypes:
@@ -108,9 +104,7 @@ def test_scaled_grouped_mm_jagged_with_zero_token_expert(native_dtypes):
     start = 0
     for expert, end in enumerate(offs.cpu().tolist()):
         expected_parts.append(
-            (mat_a[start:end].float() @ weight[expert].float()).to(
-                torch.bfloat16
-            )
+            (mat_a[start:end].float() @ weight[expert].float()).to(torch.bfloat16)
         )
         start = end
     expected = torch.cat(expected_parts)
@@ -120,19 +114,35 @@ def test_scaled_grouped_mm_jagged_with_zero_token_expert(native_dtypes):
     torch.testing.assert_close(output, expected, rtol=0.03, atol=0.03)
 
 
-def test_scaled_grouped_mm_lowers_to_direct_dot_scaled():
-    from ntops.torch.scaled_grouped_mm import _enable_dot_scaled_lowering
+@skip_if_cuda_is_unavailable
+def test_scaled_grouped_mm_decodes_every_e2m1_code_and_nibble_position():
+    codes = torch.arange(16, dtype=torch.uint8, device="cuda").repeat(2)
+    codes = codes.reshape(1, 32, 1)
+    mat_b = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
+    scale_b = torch.full((1, 1, 1), 127, dtype=torch.uint8, device="cuda")
+    mat_a = torch.eye(32, dtype=torch.bfloat16, device="cuda").unsqueeze(0)
 
-    with _enable_dot_scaled_lowering():
-        kernel = ninetoothed.make(
-            *ntops.kernels.scaled_grouped_mm.premake(False),
-            max_num_configs=1,
-        )
+    output = _scaled_grouped_mm(mat_a, mat_b, scale_b)
+    expected = _decode_mxfp4(codes, scale_b)
 
-    sources = kernel._compilation.artifact.sources.values()
-    source = "\n".join(str(value) for value in sources)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
-    assert source.count("tl.dot_scaled(") == 1
+
+def test_scaled_grouped_mm_lowers_to_portable_dot_pair():
+    kernel = ninetoothed.make(
+        *ntops.kernels.scaled_grouped_mm.premake(False),
+        max_num_configs=1,
+    )
+
+    if hasattr(kernel, "_compilation"):
+        sources = kernel._compilation.artifact.sources.values()
+        source = "\n".join(str(value) for value in sources)
+    else:
+        source = pathlib.Path(kernel._source).read_text()
+
+    dot_count = source.count("tl.dot(") + source.count("triton.language.dot(")
+    assert dot_count == 2
+    assert "dot_scaled" not in source
 
 
 def _cpu_inputs(group_count=3, total_m=None):
@@ -152,8 +162,15 @@ def _cpu_inputs(group_count=3, total_m=None):
     (
         ("scale_a", torch.ones(1), NotImplementedError),
         ("scale_recipe_a", ntops.torch.ScalingType.TensorWise, NotImplementedError),
-        ("scale_recipe_b", [ntops.torch.ScalingType.BlockWise1x32], NotImplementedError),
-        ("swizzle_a", ntops.torch.SwizzleType.NO_SWIZZLE, NotImplementedError),
+        (
+            "scale_recipe_b",
+            [
+                ntops.torch.ScalingType.BlockWise1x32,
+                ntops.torch.ScalingType.BlockWise1x32,
+            ],
+            NotImplementedError,
+        ),
+        ("swizzle_a", ntops.torch.SwizzleType.SWIZZLE_32_4_4, NotImplementedError),
         ("bias", torch.ones(1), NotImplementedError),
         ("output_dtype", torch.float16, ValueError),
         ("contraction_dim", (0,), NotImplementedError),
@@ -185,9 +202,7 @@ def test_scaled_grouped_mm_validates_shapes_and_offsets():
         _scaled_grouped_mm(mat_a.float(), mat_b, scale_b)
 
     with pytest.raises(ValueError, match="scale_b must have shape"):
-        _scaled_grouped_mm(
-            mat_a, mat_b, scale_b[:, :, :-1].contiguous()
-        )
+        _scaled_grouped_mm(mat_a, mat_b, scale_b[:, :, :-1].contiguous())
 
     jagged_a, mat_b, scale_b = _cpu_inputs(total_m=5)
 
@@ -209,3 +224,25 @@ def test_scaled_grouped_mm_validates_shapes_and_offsets():
             scale_b,
             torch.tensor((2, 2, 4), dtype=torch.int32),
         )
+
+
+def test_scaled_grouped_mm_accepts_equivalent_public_api_forms():
+    mat_a, mat_b, scale_b = _cpu_inputs(group_count=1, total_m=0)
+    offs = torch.tensor((0,), dtype=torch.int32)
+
+    output = ntops.torch.scaled_grouped_mm(
+        mat_a,
+        mat_b,
+        None,
+        None,
+        [scale_b],
+        [ntops.torch.ScalingType.BlockWise1x32],
+        swizzle_a=[ntops.torch.SwizzleType.NO_SWIZZLE],
+        swizzle_b=ntops.torch.SwizzleType.NO_SWIZZLE,
+        offs=offs,
+        output_dtype=None,
+        contraction_dim=[],
+    )
+
+    assert output.shape == (0, mat_b.shape[-1])
+    assert output.dtype == torch.bfloat16

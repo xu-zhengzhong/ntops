@@ -5,20 +5,33 @@ import ninetoothed.language as ntl
 import torch
 from ninetoothed import Tensor
 
-
 BLOCK_SIZE_M = ninetoothed.block_size(lower_bound=16)
 BLOCK_SIZE_N = ninetoothed.block_size(lower_bound=16)
-BLOCK_SIZE_K = ninetoothed.block_size(lower_bound=64)
+MICROSCALE_K = 32
+PACKED_MICROSCALE_K = MICROSCALE_K // 2
+
+
+def _arrange_activation(mat_a, output_arranged, block_size_m):
+    arranged = mat_a.tile(
+        (1, block_size_m, PACKED_MICROSCALE_K),
+        strides=(1, block_size_m, MICROSCALE_K),
+        dilation=(1, 1, 2),
+    )
+    arranged = arranged.tile((1, 1, -1))
+    arranged = arranged.expand((-1, -1, output_arranged.shape[-1]))
+    arranged.dtype = arranged.dtype.squeeze((0, 1))
+    arranged.dtype.dtype = arranged.dtype.dtype.squeeze(0)
+    return arranged
 
 
 def arrangement(
-    mat_a,
+    mat_a_even,
+    mat_a_odd,
     mat_b,
     scale_b,
     output,
     block_size_m=None,
     block_size_n=None,
-    block_size_k=None,
 ):
     if block_size_m is None:
         block_size_m = BLOCK_SIZE_M
@@ -26,68 +39,77 @@ def arrangement(
     if block_size_n is None:
         block_size_n = BLOCK_SIZE_N
 
-    if block_size_k is None:
-        block_size_k = BLOCK_SIZE_K
-
     output_arranged = output.tile((1, block_size_m, block_size_n))
     output_arranged.dtype = output_arranged.dtype.squeeze(0)
 
-    mat_a_arranged = mat_a.tile((1, block_size_m, block_size_k))
-    mat_a_arranged = mat_a_arranged.tile((1, 1, -1))
-    mat_a_arranged = mat_a_arranged.expand(
-        (-1, -1, output_arranged.shape[-1])
-    )
-    mat_a_arranged.dtype = mat_a_arranged.dtype.squeeze((0, 1))
-    mat_a_arranged.dtype.dtype = mat_a_arranged.dtype.dtype.squeeze(0)
+    mat_a_even_arranged = _arrange_activation(mat_a_even, output_arranged, block_size_m)
+    mat_a_odd_arranged = _arrange_activation(mat_a_odd, output_arranged, block_size_m)
 
-    mat_b_arranged = mat_b.tile((1, block_size_k // 2, block_size_n))
+    mat_b_arranged = mat_b.tile((1, PACKED_MICROSCALE_K, block_size_n))
     mat_b_arranged = mat_b_arranged.tile((1, -1, 1))
-    mat_b_arranged = mat_b_arranged.expand(
-        (-1, output_arranged.shape[-2], -1)
-    )
+    mat_b_arranged = mat_b_arranged.expand((-1, output_arranged.shape[-2], -1))
     mat_b_arranged.dtype = mat_b_arranged.dtype.squeeze((0, 2))
     mat_b_arranged.dtype.dtype = mat_b_arranged.dtype.dtype.squeeze(0)
 
-    scale_b_arranged = scale_b.tile((1, block_size_k // 32, block_size_n))
+    scale_b_arranged = scale_b.tile((1, 1, block_size_n))
     scale_b_arranged = scale_b_arranged.tile((1, -1, 1))
-    scale_b_arranged = scale_b_arranged.expand(
-        (-1, output_arranged.shape[-2], -1)
-    )
+    scale_b_arranged = scale_b_arranged.expand((-1, output_arranged.shape[-2], -1))
     scale_b_arranged.dtype = scale_b_arranged.dtype.squeeze((0, 2))
     scale_b_arranged.dtype.dtype = scale_b_arranged.dtype.dtype.squeeze(0)
 
-    return mat_a_arranged, mat_b_arranged, scale_b_arranged, output_arranged
+    return (
+        mat_a_even_arranged,
+        mat_a_odd_arranged,
+        mat_b_arranged,
+        scale_b_arranged,
+        output_arranged,
+    )
 
 
-def application(mat_a, mat_b, scale_b, output):
+def application(mat_a_even, mat_a_odd, mat_b, scale_b, output):
     accumulator = ntl.zeros(output.shape, dtype=ntl.float32)
 
-    for k in range(mat_a.shape[0]):
-        accumulator = ntl.dot_scaled(
-            mat_a[k],
-            None,
-            "bf16",
-            mat_b[k],
-            scale_b[k],
-            "e2m1",
-            accumulator,
-            True,
-            True,
-            True,
+    for k in range(mat_a_even.shape[0]):
+        packed = ntl.cast(mat_b[k] + 0, ntl.int32)
+        scale = ntl.exp2(ntl.cast(scale_b[k] + 0, ntl.float32) - 127.0)
+
+        even_code = packed & 0xF
+        even_magnitude_code = even_code & 0x7
+        even_exponent = even_magnitude_code >> 1
+        even_mantissa = ntl.cast(even_magnitude_code & 1, ntl.float32)
+        even_normal = (1.0 + 0.5 * even_mantissa) * ntl.exp2(
+            ntl.cast(even_exponent, ntl.float32) - 1.0
         )
+        even_magnitude = ntl.where(even_exponent == 0, 0.5 * even_mantissa, even_normal)
+        even_sign = ntl.where((even_code & 0x8) == 0, 1.0, -1.0)
+        weight_even = ntl.cast(even_sign * even_magnitude * scale, ntl.bfloat16)
+
+        odd_code = (packed >> 4) & 0xF
+        odd_magnitude_code = odd_code & 0x7
+        odd_exponent = odd_magnitude_code >> 1
+        odd_mantissa = ntl.cast(odd_magnitude_code & 1, ntl.float32)
+        odd_normal = (1.0 + 0.5 * odd_mantissa) * ntl.exp2(
+            ntl.cast(odd_exponent, ntl.float32) - 1.0
+        )
+        odd_magnitude = ntl.where(odd_exponent == 0, 0.5 * odd_mantissa, odd_normal)
+        odd_sign = ntl.where((odd_code & 0x8) == 0, 1.0, -1.0)
+        weight_odd = ntl.cast(odd_sign * odd_magnitude * scale, ntl.bfloat16)
+
+        accumulator += ntl.dot(mat_a_even[k], weight_even)
+        accumulator += ntl.dot(mat_a_odd[k], weight_odd)
 
     output = accumulator
 
 
-def premake(jagged=False, block_size_m=None, block_size_n=None, block_size_k=None):
+def premake(jagged=False, block_size_m=None, block_size_n=None):
     arrangement_ = functools.partial(
         arrangement,
         block_size_m=block_size_m,
         block_size_n=block_size_n,
-        block_size_k=block_size_k,
     )
     jagged_dim = 1 if jagged else None
     tensors = (
+        Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim, other=0),
         Tensor(3, dtype=torch.bfloat16, jagged_dim=jagged_dim, other=0),
         Tensor(3, dtype=torch.uint8, other=0),
         Tensor(3, dtype=torch.uint8, other=127),
