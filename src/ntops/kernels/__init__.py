@@ -27,6 +27,7 @@ from ntops.kernels import (
     eq,
     exp,
     fmax,
+    fused_mla_rope_cache_write,
     ge,
     gelu,
     gt,
@@ -154,4 +155,5 @@ __all__ = [
     "lp_pool2d",
     "lp_pool3d",
     "max",
+    "fused_mla_rope_cache_write",
 ]

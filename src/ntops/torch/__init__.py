@@ -26,6 +26,10 @@ from ntops.torch.dropout import dropout
 from ntops.torch.eq import eq
 from ntops.torch.exp import exp
 from ntops.torch.fmax import fmax
+from ntops.torch.fused_mla_rope_cache_write import (
+    fused_mla_rope_cache_write,
+    fused_mla_rope_cache_write_reference,
+)
 from ntops.torch.ge import ge
 from ntops.torch.gelu import gelu
 from ntops.torch.gt import gt
@@ -155,4 +159,6 @@ __all__ = [
     "lp_pool2d",
     "lp_pool3d",
     "max",
+    "fused_mla_rope_cache_write",
+    "fused_mla_rope_cache_write_reference",
 ]
