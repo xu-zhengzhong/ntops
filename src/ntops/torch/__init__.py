@@ -54,6 +54,11 @@ from ntops.torch.median import median
 from ntops.torch.mm import mm
 from ntops.torch.msort import msort
 from ntops.torch.mul import mul
+from ntops.torch.mxfp4_w4a16_grouped_mm import (
+    ScalingType,
+    SwizzleType,
+    mxfp4_w4a16_grouped_mm,
+)
 from ntops.torch.ne import ne
 from ntops.torch.neg import neg
 from ntops.torch.pow import pow
@@ -126,6 +131,9 @@ __all__ = [
     "round",
     "rsqrt",
     "scaled_dot_product_attention",
+    "ScalingType",
+    "SwizzleType",
+    "mxfp4_w4a16_grouped_mm",
     "select_copy",
     "sgn",
     "sigmoid",
