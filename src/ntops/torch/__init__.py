@@ -14,6 +14,7 @@ from ntops.torch.bincount import bincount
 from ntops.torch.bitwise_and import bitwise_and
 from ntops.torch.bitwise_not import bitwise_not
 from ntops.torch.bitwise_or import bitwise_or
+from ntops.torch.block_scaled_fp8_mm import block_scaled_fp8_mm
 from ntops.torch.bmm import bmm
 from ntops.torch.celu import celu
 from ntops.torch.clamp import clamp
@@ -134,6 +135,7 @@ __all__ = [
     "ScalingType",
     "SwizzleType",
     "mxfp4_w4a16_grouped_mm",
+    "block_scaled_fp8_mm",
     "select_copy",
     "sgn",
     "sigmoid",
